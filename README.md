@@ -1,1 +1,417 @@
 # Invoice-matching-automation
+
+An AI-assisted, **deterministic** Invoice Processing and PO-Matching system. It takes one invoice
+PDF at a time (digital or scanned), extracts its fields, matches it to a purchase order, runs a
+fixed set of business-rule checks, and returns an explainable `APPROVE` / `APPROVE_PARTIAL` /
+`REVIEW` / `REJECT` decision with a full audit trail.
+
+```
+POST /api/decide  (multipart/form-data, field "file")  ->  JSON decision
+```
+
+## 1. What this project does
+
+Given one invoice PDF, the system produces:
+
+- Extracted invoice fields (vendor, invoice number/date, PO reference, line items, amounts)
+- The matched PO (number, spreadsheet row, snapshot, match method, confidence)
+- A set of named PASS/FAIL/WARNING/NOT_CHECKED checks (vendor approval, duplicate, PO match,
+  line items, quantities, prices, tolerance, arithmetic, split-invoice, ...)
+- Duplicate status, vendor status, amount/tolerance analysis, split-invoice state
+- A final decision plus a human-readable reason
+- A step-by-step audit/processing log
+
+It is built to run against the real dataset shipped in `invoice_po_matching_dataset/` (12 invoices)
+plus a supplementary synthetic set in `invoices/` (15 more invoices covering edge cases the
+provided dataset doesn't, e.g. split invoicing and PO-number formatting variants) -- 27 invoices
+in total, all wired into one integration test.
+
+## 2. Architecture
+
+```
+Invoice PDF
+    |
+Duplicate detection (SHA256 of the raw bytes, checked BEFORE any extraction)
+    |
+PDF text extraction (PyMuPDF)
+    |
+   usable text? --NO--> render page to image -> Tesseract OCR -> Qwen3-VL (Ollama) -> structured JSON
+    |
+   YES
+    |
+Regex/heuristic structured extraction (no LLM)
+    |
+Invoice validation (required fields, arithmetic: qty*price, subtotal+tax=total)
+    |
+Vendor validation (normalized name match against vendor master; approval status)
+    |
+PO matching (level 1: exact normalized PO number: level 2: malformed/partial PO number;
+             level 3: vendor+line-item+amount candidate scoring, ranked, with a confidence
+             threshold and an ambiguity margin)
+    |
+Invoice <-> PO checks (vendor identity, line items, quantity, unit price)
+    |
+Tolerance (vendor- or PO-level, percentage or absolute)
+    |
+Split/partial invoice handling (cumulative amount vs PO amount, from the permanent ledger)
+    |
+Decision engine (deterministic Python; REJECT > REVIEW > APPROVE/APPROVE_PARTIAL precedence)
+    |
+Audit log + permanent invoice ledger (SQLite)
+    |
+JSON response  ->  React frontend
+```
+
+Every box above is a plain, independently-testable Python module (see `backend/app/`). Nothing in
+that chain is an LLM call except the scanned-PDF OCR+vision step, and even there the model's output
+is normalized into the same Pydantic schema the digital-text parser produces and then runs through
+the *exact same* deterministic downstream pipeline.
+
+### Project layout
+
+```
+backend/
+  app/
+    main.py                    FastAPI app, CORS, startup (DB init, data loading)
+    config.py                  All configuration (env-driven, no hardcoding)
+    database.py                SQLite connection + schema
+    api/routes.py               POST /api/decide, GET /api/health (no business logic here)
+    extraction/                 pdf_extractor, ocr, vision_extractor, invoice_parser
+    matching/                   normalization, fuzzy_matcher, po_matcher (levels 1/2/3)
+    validation/                 invoice_validator, amount_validator, line_item_validator, vendor_validator
+    duplicate/                  duplicate_detector, invoice_ledger (permanent + temp cache)
+    rules/                      tolerance, split_invoice, decision_engine
+    models/                     invoice.py, po.py, result.py (Pydantic schemas)
+    services/                   data_loader (PO/vendor spreadsheets), processing_service (orchestrator)
+    agent/                      exception_agent.py (optional, advisory-only)
+  tests/                       unit tests per module + one full-dataset integration test
+frontend/                      React + Vite UI
+data/
+  purchase_orders.xlsx         merged: real dataset's POs + supplementary synthetic POs
+  vendors.xlsx                 merged vendor master
+  rules.yaml                   human-readable mirror of the scoring/tolerance constants
+  invoice_ledger.db            created at runtime (permanent ledger; not committed)
+invoices/                      27 test invoices (real dataset copies + synthetic) + ground_truth.json
+invoice_po_matching_dataset/    the REAL provided dataset, UNMODIFIED (see its own README)
+scripts/generate_dataset.py    builds data/*.xlsx + invoices/* from the real dataset + synthetic cases
+logs/                          app.log at runtime
+```
+
+## 3. Why GenAI is used (and where)
+
+GenAI (a vision-language model, Qwen3-VL by default) is used for exactly one thing: **turning a
+scanned/image invoice into a structured JSON guess** when there is no extractable text layer. It
+receives the rendered page image plus the Tesseract OCR text and is instructed to return *only* a
+JSON object matching the invoice schema, with `null` for anything it can't read reliably. That's
+document understanding, not decision-making.
+
+Optionally (`ENABLE_EXCEPTION_AGENT=true`), a second, separate LLM call can produce a short,
+advisory explanation for a case that already landed on `REVIEW` -- e.g. "this looks like a
+possible split invoice, check invoice #X against the same PO." It never changes the decision.
+
+## 4. Why deterministic rules are used for everything else
+
+Arithmetic, tolerance math, duplicate detection, PO matching thresholds, and the final decision
+are all plain Python. An LLM is never asked "is this invoice okay to pay" and never asked to add
+or compare numbers. This is a hard requirement from the spec and a sound one: financial decisions
+need to be reproducible, auditable, and explainable after the fact, which a generative model's
+output is not guaranteed to be from one run to the next.
+
+## 5. Why this is NOT fully agentic
+
+There is no autonomous loop deciding what to do next. `services/processing_service.py` calls a
+fixed sequence of plain functions in a fixed order every time. The only optional AI-agent-like
+piece (`agent/exception_agent.py`) is a single advisory call, gated by a config flag, that runs
+*after* the decision is already final and cannot alter it. If it's disabled, times out, or the
+model is unreachable, the pipeline behaves identically -- it just doesn't have that extra note
+attached.
+
+## 6. How scanned invoices are handled
+
+1. `extraction/pdf_extractor.py` extracts text with PyMuPDF. If the cleaned text is shorter than
+   `MIN_TEXT_LENGTH_FOR_DIGITAL` chars or is mostly non-alphanumeric, the PDF is treated as scanned.
+2. The first page is rendered to a PIL image (`render_first_page_to_image`).
+3. `extraction/ocr.py` runs Tesseract on that image. If Tesseract isn't installed/configured, this
+   is caught (`OCRUnavailableError`) and logged -- the pipeline continues with empty OCR text rather
+   than crashing.
+4. `extraction/vision_extractor.py` sends the image + OCR text to Qwen3-VL via Ollama
+   (`POST {OLLAMA_BASE_URL}/api/generate`, `format: "json"`), with a prompt that forbids inventing
+   values and requires a single JSON object matching the invoice schema.
+5. The JSON is parsed defensively (strips code fences, finds the first balanced `{...}` if the
+   model added stray text) and normalized into the same `StructuredInvoice` schema as the digital
+   path, tagged `"method": "tesseract_qwen3_vl"`.
+6. If OCR *and* the vision call both fail to produce anything usable, the endpoint still returns
+   HTTP 200 with `decision: "REVIEW"` and a reason explaining extraction failed -- never a 500.
+
+**In this sandboxed dev environment, neither Tesseract nor Ollama is installed**, so all 7 scanned
+invoices in the dataset (1 synthetic + 6 real) currently resolve to `REVIEW` via this graceful
+fallback. The integration test marks these `environment_dependent: true` and reports them as
+`SKIP(env)` rather than hard failures -- see section 17 (Known limitations) and section 12 (Testing).
+With Tesseract + Ollama configured, they're expected to extract successfully and match the real
+dataset's ground truth (`APPROVE`/`REVIEW`/`REJECT` per invoice).
+
+## 7. How PO matching works
+
+`matching/po_matcher.py`, in order:
+
+- **Level 1 -- exact normalized match.** `matching/normalization.py` strips spaces/hyphens/slashes/
+  punctuation and uppercases (`PO-1005`, `PO 1005`, `po/1005` all become `PO1005`). If the invoice's
+  normalized PO number equals exactly one PO's normalized number, that's the match (confidence 1.0).
+- **Level 2 -- malformed/partial reference.** If level 1 finds nothing, digits-only containment is
+  tried (e.g. `Ref: 1011` -> digits `1011` matches PO `PO1011`'s digits). Confidence 0.75-0.9.
+- **Level 3 -- no usable PO number.** Every PO is scored against the invoice using a configurable
+  weighted blend (defaults in `.env`/`config.py`, mirrored in `data/rules.yaml`):
+  `vendor_match 30 + item_similarity 30 + quantity_match 15 + unit_price_match 15 + amount_match 10`.
+  The ranked candidate list is always returned. The top candidate is only used as a match if its
+  score clears `PO_MATCH_THRESHOLD` (default 0.85) **and** beats the runner-up by at least
+  `AMBIGUOUS_MATCH_MARGIN` (default 0.05); otherwise the result is `ambiguous`/`no_match`.
+
+**Important policy, confirmed against the real provided dataset's ground truth
+(`digital_04_missing_po.pdf`):** a level-3 candidate match is *never* enough, by itself, to
+`APPROVE` -- even a perfect-looking match still routes to `REVIEW` for a human to confirm, because
+the PO reference itself was missing from the invoice. This mirrors the real dataset's own rule
+`R002` ("if missing, attempt candidate matching; do not auto-approve solely from vendor/amount").
+Level 1/2 matches (a PO reference was present, even if malformed) can still reach `APPROVE`.
+
+## 8. Duplicate detection
+
+Runs immediately after the SHA256 of the raw PDF bytes is computed -- before any extraction, so a
+resubmitted file is rejected cheaply. Three signals, checked in this project's `duplicate/` module:
+
+1. **Exact document hash** (`invoice_ledger.document_hash`) -> `REJECT` (`EXACT_DUPLICATE`).
+2. **Same normalized vendor + normalized invoice number** -> `REJECT` (`VENDOR_INVOICE_DUPLICATE`).
+3. **Same vendor + amount + date but a different invoice number** -> `REVIEW` (`POTENTIAL_DUPLICATE`).
+
+The **permanent ledger** (`invoice_ledger` table in SQLite) is never purged and survives restarts --
+it's the system of record for duplicate detection and split-invoice math. A separate,
+genuinely-expirable `processing_cache` table exists for any short-lived helper state
+(`TEMP_CACHE_TTL_HOURS`, default 24h) and nothing financial ever reads from it.
+
+## 9. Split/partial invoice handling
+
+`rules/split_invoice.py` sums prior *approved* ledger entries for the same (PO, vendor) pair to get
+`previously_invoiced`, adds the current invoice to get `cumulative_invoiced`, and compares that to
+the PO's amount. If there's already a prior invoice against that PO, or this invoice alone doesn't
+cover the full PO amount (within tolerance), it's marked `PARTIAL_INVOICE`. The tolerance check for
+a partial invoice only fails on **overbilling** (cumulative exceeds PO amount + tolerance) --
+under-billing is expected mid-sequence and is not an error. See `invoices/split_invoice_1/2/3.pdf`
+for a worked 40/30/30-of-100 example (all three correctly resolve to `APPROVE_PARTIAL`).
+
+## 10. Vendor tolerance
+
+Each vendor in `data/vendors.xlsx` has a default `tolerance_type` (`percentage` or `absolute`) and
+`tolerance_value`. A PO row can optionally override this (see the `Tolerance Type`/`Tolerance
+Value` columns in `data/purchase_orders.xlsx`) -- the real provided dataset specifies tolerance
+*per PO* (e.g. Delta Facilities Management is 2% on `PO1004` but 1% on `PO1006`/`PO1013`), so a
+PO-level value, when present, takes precedence over the vendor's default. All arithmetic is in
+`rules/tolerance.py`; nothing here is ever computed by an LLM.
+
+## 11. API usage
+
+```
+POST /api/decide
+Content-Type: multipart/form-data
+field: file=<invoice.pdf>
+```
+
+```bash
+curl -X POST http://localhost:8000/api/decide \
+  -F "file=@invoices/price_mismatch.pdf"
+```
+
+Returns **HTTP 200** for every successfully-processed invoice, including `REVIEW` and `REJECT`
+outcomes. HTTP 4xx/5xx is reserved for actual processing/system errors (not a PDF, empty file,
+missing PO/vendor spreadsheet, etc.) -- see `api/routes.py`.
+
+`GET /api/health` reports the configured vision provider/model and whether the exception agent is
+enabled.
+
+### Example response (`price_mismatch.pdf`, abridged)
+
+```json
+{
+  "decision": "REVIEW",
+  "reason": "Unit price mismatch: '42U Server Rack Unit': invoice unit_price 43333.33 vs PO 40000.0",
+  "checks": {
+    "vendor_approved": { "status": "PASS", "reason": "Vendor 'BrightTech Solutions Pvt Ltd' is APPROVED (matched via exact_normalized, confidence 1.00)." },
+    "po_match": { "status": "PASS", "expected": "PO2009", "actual": "PO2009", "reason": "Invoice PO reference 'PO2009' normalized to 'PO2009' matched PO PO2009 exactly." },
+    "quantity_match": { "status": "PASS", "expected": 3.0, "actual": 3.0, "difference": 0.0 },
+    "unit_price_match": { "status": "FAIL", "reason": "Unit price mismatch: '42U Server Rack Unit': invoice unit_price 43333.33 vs PO 40000.0" },
+    "tolerance_check": { "status": "FAIL", "expected": 120000.0, "actual": 130000.0, "difference": 10000.0, "reason": "... exceeding the allowed percentage tolerance of 2400.0." }
+  },
+  "matched_po": {
+    "po_number": "PO2009", "spreadsheet_row": 10, "vendor": "BrightTech Solutions Pvt Ltd",
+    "match_method": "exact_normalized_po", "match_confidence": 1.0
+  },
+  "amount_analysis": { "invoice_total": 130000.0, "po_total": 120000.0, "difference": 10000.0, "allowed_tolerance": 2400.0 },
+  "audit": { "processing_steps": ["Invoice received: price_mismatch.pdf", "SHA256 calculated: ...", "..."] }
+}
+```
+
+## 12. Frontend usage
+
+`frontend/` is a small React + Vite app: an upload button, a colored decision badge
+(🟢 APPROVE / 🔵 APPROVE_PARTIAL / 🟡 REVIEW / 🔴 REJECT), invoice details, matched-PO details, a
+checks list (failed checks are visually distinct), and a collapsible audit trail. It calls
+`VITE_API_BASE_URL` (default `http://localhost:8000`).
+
+> **Note on this sandbox:** the environment this was built in has no Node.js/npm installed, so the
+> frontend could not be `npm install`'d or run here. The backend was fully verified instead (unit
+> tests, the full-dataset integration test, and live `curl` requests against a running
+> `uvicorn` server). The React code follows standard Vite conventions and should run with a normal
+> `npm install && npm run dev` on a machine with Node -- see section 13.
+
+## 13. Environment setup
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+copy .env.example .env      # or: cp .env.example .env
+python scripts/generate_dataset.py   # builds data/*.xlsx + invoices/* (safe to re-run)
+```
+
+Run the backend:
+
+```bash
+cd backend
+uvicorn app.main:app --reload --port 8000
+```
+
+Run the frontend (requires Node.js 18+):
+
+```bash
+cd frontend
+npm install
+copy .env.example .env
+npm run dev
+```
+
+## 14. Qwen / Ollama setup
+
+The vision provider is configurable (`VISION_PROVIDER`, default and only implemented value:
+`ollama`); no API keys are hard-coded anywhere.
+
+```bash
+# https://ollama.com
+ollama pull qwen3-vl:8b
+ollama serve   # default http://localhost:11434
+```
+
+Set in `.env`:
+
+```
+VISION_PROVIDER=ollama
+QWEN_MODEL=qwen3-vl:8b
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+If Ollama isn't running or the model isn't pulled, scanned-invoice requests degrade gracefully to
+`REVIEW` (see section 6) instead of failing the request.
+
+## 15. Tesseract setup
+
+```
+# Windows: install from https://github.com/UB-Mannheim/tesseract/wiki, then in .env:
+TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+
+# macOS: brew install tesseract
+# Debian/Ubuntu: apt-get install tesseract-ocr
+# (leave TESSERACT_CMD blank if tesseract is already on PATH)
+```
+
+## 16. Running tests
+
+```bash
+cd backend
+pytest -q          # unit tests for every module + the full-dataset integration test
+pytest -q -s tests/test_integration_dataset.py   # just the dataset table (see below)
+```
+
+39 tests total. The integration test processes all 27 invoices in `invoices/` and prints an
+`invoice | expected | actual | PASS/FAIL` table, e.g.:
+
+```
+invoice                          expected         actual           result
+-------------------------------------------------------------------------
+digital_01_clean_exact.pdf        APPROVE          APPROVE          PASS
+digital_02_price_mismatch.pdf     REVIEW           REVIEW           PASS
+digital_04_missing_po.pdf         REVIEW           REVIEW           PASS
+scanned_01_exact_match.pdf        APPROVE          REVIEW           SKIP(env)
+split_invoice_1.pdf               APPROVE_PARTIAL  APPROVE_PARTIAL  PASS
+unapproved_vendor.pdf             REJECT           REJECT           PASS
+...
+```
+
+`SKIP(env)` rows are the 7 scanned invoices, which require Tesseract + Ollama to extract fields
+(see section 6); every non-scanned case passes deterministically.
+
+## 17. Dataset structure
+
+- **`invoice_po_matching_dataset/`** -- the real dataset provided for this project, copied
+  verbatim (12 invoice PDFs: 6 digital + 6 scanned; a workbook with `purchase_orders`,
+  `vendor_master`, `invoice_ground_truth`, `matching_rules`, `candidate_matches`, and
+  `expected_processing_log` sheets). **Never modified** -- see its own `README.md`.
+- **`invoices/`** -- copies of those 12 real invoices, PLUS 15 supplementary synthetic invoices
+  this project generated to cover cases the real dataset doesn't (split/partial invoicing across
+  3 invoices, a PO-number formatting variant, a malformed PO reference, bundled line items) --
+  27 files total, plus `ground_truth.json` (expected decision + provenance for each).
+- **`data/purchase_orders.xlsx`** / **`data/vendors.xlsx`** -- built by
+  `scripts/generate_dataset.py`, merging the real dataset's PO/vendor facts with the supplementary
+  synthetic POs (renumbered `PO2xxx` to avoid colliding with the real dataset's `PO1xxx`/`PO9998`).
+
+Re-run `python scripts/generate_dataset.py` any time to rebuild `data/*.xlsx` and the synthetic
+invoices from scratch (idempotent; the real invoice PDFs are only copied, never regenerated).
+
+## 18. Known limitations
+
+- **Digital-text parsing is heuristic, not a general table/layout engine.** It handles a real
+  range of label wording and layouts (single "Label: value" lines, several packed onto one line,
+  bare column-header rows followed by a positionally-aligned data row) and a line-item table
+  keyed off a `Description...Qty...`-style header (pipe-delimited or whitespace-column-aligned),
+  because that's what both the provided and synthetic invoices use. A genuinely arbitrary layout
+  (e.g. a scanned-looking table with merged cells, or right-to-left column order) is not guaranteed
+  to parse correctly with a digital text layer -- that's what the OCR+vision path is for.
+- **OCR/vision are not verified end-to-end in this environment** (no Tesseract/Ollama installed
+  here). The code path, prompt, and JSON-repair logic are implemented and unit-testable up to the
+  external call; the 7 scanned invoices in the dataset are the acceptance criteria once those
+  dependencies are installed.
+- **Vendor fuzzy-matching floor (0.90) and item-similarity floor (0.55) are fixed constants**, not
+  yet exposed via `.env`, since the dataset didn't require tuning them.
+- **Quantity checks only catch overbilling** (invoicing more than the PO), by design, so that
+  legitimate partial/split invoices aren't flagged -- see section 9. A non-split invoice that
+  under-bills quantity by mistake will not fail this specific check (it will still show up as a
+  `PARTIAL_INVOICE` with a nonzero remaining balance in the response, which is visible but not a
+  hard failure).
+- **The frontend was not run/tested** in this sandbox (no Node.js available) -- see section 12.
+- **Single-page rendering for scanned PDFs**: only the first page is rendered to an image for
+  OCR/vision; a multi-page scanned invoice's later pages are not currently processed.
+
+## 19. Future improvements
+
+- A general-purpose table extraction layer (e.g. column-position clustering) instead of the
+  current header-keyword + delimiter heuristics, for arbitrary digital layouts.
+- Expose the fuzzy-matching floors and level-3 scoring weights via `.env`/`rules.yaml` fully (the
+  weights already are; the match floors in `validation/line_item_validator.py` and
+  `validation/vendor_validator.py` aren't yet).
+- Multi-page invoice/PO support (multiple invoices or continuation pages in one PDF).
+- A small admin view (backed by the existing `invoice_ledger` table) to browse processed invoices,
+  their decisions, and re-open a `REVIEW` case with the original PDF.
+- Swap in a real embeddings model for `item_similarity` instead of `rapidfuzz` token-based scoring,
+  for descriptions that are semantically similar but lexically very different.
+
+## 20. Engineering principles this project follows
+
+1. Deterministic financial calculations only (Python), never an LLM.
+2. LLMs are used solely for document understanding (scanned-invoice extraction) and, optionally,
+   advisory explanations of already-final `REVIEW` cases.
+3. Every decision is explainable: a `reason` string plus a full `checks` breakdown.
+4. Every important step is logged (`audit.processing_steps`, plus Python `logging`).
+5. Missing fields are `null`, never invented.
+6. Original spreadsheet row numbers are preserved and returned alongside a full PO snapshot.
+7. The permanent invoice ledger survives restarts and is not time-limited; only the separate
+   temporary processing cache has a TTL.
+8. Every module under `backend/app/` is independently unit-testable (see `backend/tests/`).
+9. All configuration is environment-driven (`.env`/`config.py`); nothing is hardcoded, no secrets
+   are committed.
+10. Ambiguous cases are never silently approved -- see sections 7 and 9.

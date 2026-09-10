@@ -1,0 +1,234 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --border: #e2e2e6;
+  --text: #1a1a1e;
+  --muted: #6b6b74;
+  --approve: #1f8a4c;
+  --approve-bg: #e6f6ec;
+  --partial: #1f6fd6;
+  --partial-bg: #e8f1fd;
+  --review: #b8860b;
+  --review-bg: #fdf3d9;
+  --reject: #c0392b;
+  --reject-bg: #fbe8e6;
+  --pass: #1f8a4c;
+  --fail: #c0392b;
+  --warning: #b8860b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.app {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin-bottom: 4px;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin-top: 0;
+  margin-bottom: 24px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.upload-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+button {
+  background: #1a1a1e;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 18px;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #a6a6ac;
+  cursor: not-allowed;
+}
+
+input[type="file"] {
+  font-size: 0.9rem;
+}
+
+.error-banner {
+  background: var(--reject-bg);
+  color: var(--reject);
+  border: 1px solid var(--reject);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+
+.decision-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.3rem;
+  font-weight: 600;
+  padding: 10px 18px;
+  border-radius: 999px;
+  margin-bottom: 8px;
+}
+
+.decision-APPROVE {
+  background: var(--approve-bg);
+  color: var(--approve);
+}
+.decision-APPROVE_PARTIAL {
+  background: var(--partial-bg);
+  color: var(--partial);
+}
+.decision-REVIEW {
+  background: var(--review-bg);
+  color: var(--review);
+}
+.decision-REJECT {
+  background: var(--reject-bg);
+  color: var(--reject);
+}
+
+.reason {
+  font-size: 1rem;
+  color: var(--text);
+  margin: 8px 0 0;
+}
+
+.section-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 20px;
+}
+
+.kv-grid .kv-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.kv-grid .kv-value {
+  font-size: 0.98rem;
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.checks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 0.92rem;
+}
+
+.check-item.status-FAIL {
+  background: var(--reject-bg);
+}
+.check-item.status-WARNING {
+  background: var(--review-bg);
+}
+.check-item.status-PASS {
+  background: transparent;
+}
+.check-item.status-NOT_CHECKED {
+  opacity: 0.6;
+}
+
+.check-icon {
+  font-weight: 700;
+}
+.status-PASS .check-icon {
+  color: var(--pass);
+}
+.status-FAIL .check-icon {
+  color: var(--fail);
+}
+.status-WARNING .check-icon {
+  color: var(--warning);
+}
+.status-NOT_CHECKED .check-icon {
+  color: var(--muted);
+}
+
+.check-name {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.check-reason {
+  color: var(--muted);
+}
+
+.audit-list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.audit-list li {
+  margin-bottom: 4px;
+}
+
+details.panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.candidate-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.loading {
+  color: var(--muted);
+}

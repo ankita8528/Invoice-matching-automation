@@ -1,0 +1,25 @@
+# Deterministic business-rule weights and thresholds.
+# The decision engine and PO matcher read numbers from config.py (env-driven);
+# this file documents the same values in one human-readable place and is used
+# by the dataset generator / docs. Keep it in sync with .env.
+
+po_matching:
+  level3_scoring_weights:
+    vendor_match: 30
+    item_similarity: 30
+    quantity_match: 15
+    unit_price_match: 15
+    amount_match: 10
+  # Minimum score (0-1) for a level-3 candidate to be treated as a confident match.
+  confidence_threshold: 0.85
+  # If the top two candidates are within this margin of each other, treat as ambiguous -> REVIEW.
+  ambiguous_margin: 0.05
+
+tolerance:
+  # Fallback tolerance used only if a vendor record cannot be found at all.
+  default_type: percentage
+  default_value: 0
+
+arithmetic:
+  # Currency-unit epsilon allowed between calculated and stated totals due to rounding.
+  epsilon: 1.0

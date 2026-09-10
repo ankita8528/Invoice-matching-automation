@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+backend/.pytest_cache/
+
+# Environment / secrets
+.env
+
+# Generated runtime state (NOT the shipped data/vendors.xlsx, data/purchase_orders.xlsx, data/rules.yaml)
+data/invoice_ledger.db
+data/invoice_ledger.db-wal
+data/invoice_ledger.db-shm
+
+# Logs
+logs/*.log
+!logs/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# OS
+.DS_Store
+Thumbs.db

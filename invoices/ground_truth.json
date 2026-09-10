@@ -1,0 +1,144 @@
+{
+  "exact_match.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "Exact PO number, vendor, quantity, price, amount match.",
+    "source": "synthetic (this script)"
+  },
+  "price_mismatch.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "Unit price and total exceed PO2009 amount beyond the 2% vendor tolerance.",
+    "source": "synthetic (this script)"
+  },
+  "quantity_mismatch.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "Invoice bills 15 units against a PO2003 quantity of 12 (overbilling).",
+    "source": "synthetic (this script)"
+  },
+  "missing_po.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "No PO number on invoice; unambiguously matched to PO2004 via vendor/item/amount similarity, but still routed to REVIEW for human confirmation since the PO reference itself was missing.",
+    "source": "synthetic (this script)"
+  },
+  "tax_total_mismatch.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "Stated total (50000) does not equal subtotal+tax (52800); arithmetic check fails.",
+    "source": "synthetic (this script)"
+  },
+  "missing_date.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "Invoice date missing; required-fields check fails even though amounts reconcile.",
+    "source": "synthetic (this script)"
+  },
+  "split_invoice_1.pdf": {
+    "expected_decision": "APPROVE_PARTIAL",
+    "notes": "First of 3 split invoices against PO2010 (40/100 man-days).",
+    "source": "synthetic (this script)"
+  },
+  "split_invoice_2.pdf": {
+    "expected_decision": "APPROVE_PARTIAL",
+    "notes": "Second of 3 split invoices against PO2010 (cumulative 70/100 man-days).",
+    "source": "synthetic (this script)"
+  },
+  "split_invoice_3.pdf": {
+    "expected_decision": "APPROVE_PARTIAL",
+    "notes": "Third of 3 split invoices against PO2010; cumulative reaches 100/100 man-days.",
+    "source": "synthetic (this script)"
+  },
+  "scanned_invoice.pdf": {
+    "expected_decision": "REVIEW",
+    "environment_dependent": true,
+    "notes": "Image-only PDF (no text layer). Expects REVIEW ('could not be reliably extracted') when Tesseract/Ollama are not configured; may extract successfully (and APPROVE) once they are.",
+    "source": "synthetic (this script)"
+  },
+  "unapproved_vendor.pdf": {
+    "expected_decision": "REJECT",
+    "notes": "Vendor 'Unknown Vendor' (V005) has status NOT_APPROVED in the vendor master.",
+    "source": "synthetic (this script)"
+  },
+  "different_layout.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "Alternate invoice layout/label wording (template B) for the same underlying PO2008 match.",
+    "source": "synthetic (this script)"
+  },
+  "po_number_format_variant.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "PO written as 'PO-2005'; normalizes to 'PO2005' for an exact level-1 match.",
+    "source": "synthetic (this script)"
+  },
+  "malformed_po.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "PO reference given only as 'Ref: 2011' (malformed); matched to PO2011 via digits-only normalization (level 2).",
+    "source": "synthetic (this script)"
+  },
+  "bundled_line_items.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "Invoice bundles PO2012's two separate line items (Pens Box + Notebooks Pack) into a single line; unit-price reconciliation fails at line-item level and is correctly routed to REVIEW rather than silently approved.",
+    "source": "synthetic (this script)"
+  },
+  "digital_01_clean_exact.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "(real provided dataset) clean digital exact match",
+    "source": "invoice_po_matching_dataset"
+  },
+  "digital_02_price_mismatch.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "(real provided dataset) unit price mismatch on docking station; total exceeds PO",
+    "source": "invoice_po_matching_dataset"
+  },
+  "digital_03_quantity_mismatch.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "(real provided dataset) quantity mismatch: 25 docking stations invoiced vs 20 on PO",
+    "source": "invoice_po_matching_dataset"
+  },
+  "digital_04_missing_po.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "(real provided dataset) PO reference missing; candidate PO9998 exists but cannot be assumed without matching",
+    "source": "invoice_po_matching_dataset"
+  },
+  "digital_05_tax_total_error.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "(real provided dataset) subtotal + tax arithmetic error: 45,000 + 8,100 = 53,100, not 55,000",
+    "source": "invoice_po_matching_dataset"
+  },
+  "digital_06_missing_date_amount_mismatch.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "(real provided dataset) invoice date missing and amount is 5,000 below PO",
+    "source": "invoice_po_matching_dataset"
+  },
+  "scanned_01_exact_match.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "(real provided dataset) scanned invoice; exact PO match -- scanned/image PDF; requires Tesseract + a vision model (Ollama/Qwen3-VL) configured to extract fields.",
+    "source": "invoice_po_matching_dataset",
+    "environment_dependent": true
+  },
+  "scanned_02_price_mismatch.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "(real provided dataset) scanned invoice; docking station rate is 5,000 vs PO 4,500 -- scanned/image PDF; requires Tesseract + a vision model (Ollama/Qwen3-VL) configured to extract fields.",
+    "source": "invoice_po_matching_dataset",
+    "environment_dependent": true
+  },
+  "scanned_03_tax_separate.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "(real provided dataset) scanned invoice; tax separated and total is arithmetically correct -- scanned/image PDF; requires Tesseract + a vision model (Ollama/Qwen3-VL) configured to extract fields.",
+    "source": "invoice_po_matching_dataset",
+    "environment_dependent": true
+  },
+  "scanned_04_wrong_item.pdf": {
+    "expected_decision": "REVIEW",
+    "notes": "(real provided dataset) scanned statement; invoice line is toner but PO is office paper -- scanned/image PDF; requires Tesseract + a vision model (Ollama/Qwen3-VL) configured to extract fields.",
+    "source": "invoice_po_matching_dataset",
+    "environment_dependent": true
+  },
+  "scanned_05_tax_exact.pdf": {
+    "expected_decision": "APPROVE",
+    "notes": "(real provided dataset) scanned invoice; subtotal, tax and total match -- scanned/image PDF; requires Tesseract + a vision model (Ollama/Qwen3-VL) configured to extract fields.",
+    "source": "invoice_po_matching_dataset",
+    "environment_dependent": true
+  },
+  "scanned_06_unapproved_vendor.pdf": {
+    "expected_decision": "REJECT",
+    "notes": "(real provided dataset) scanned invoice; vendor is not approved in vendor master -- scanned/image PDF; requires Tesseract + a vision model (Ollama/Qwen3-VL) configured to extract fields.",
+    "source": "invoice_po_matching_dataset",
+    "environment_dependent": true
+  }
+}
