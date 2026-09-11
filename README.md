@@ -5,6 +5,8 @@ PDF at a time (digital or scanned), extracts its fields, matches it to a purchas
 fixed set of business-rule checks, and returns an explainable `APPROVE` / `Accept/partial payment` /
 `REVIEW` / `REJECT` decision with a full audit trail.
 
+Deployed URL: https://development-5yva2agivxzhfpxudr6izc.streamlit.app/   (limited hits!!!!)
+
 ```
 POST /api/decide  (multipart/form-data, field "file")  ->  JSON decision
 ```
