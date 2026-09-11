@@ -20,10 +20,11 @@ router = APIRouter()
 @router.get("/health")
 async def health(request: Request) -> dict:
     settings = request.app.state.settings
+    active_model = settings.hf_vision_model if settings.vision_provider == "huggingface" else settings.qwen_model
     return {
         "status": "ok",
         "vision_provider": settings.vision_provider,
-        "qwen_model": settings.qwen_model,
+        "vision_model": active_model,
         "exception_agent_enabled": settings.enable_exception_agent,
     }
 

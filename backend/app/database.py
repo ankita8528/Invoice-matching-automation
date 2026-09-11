@@ -1,11 +1,12 @@
-"""SQLite connection + schema management for the permanent invoice ledger
-and the (separate, expirable) temporary processing cache.
+"""SQLite connection + schema management for the persistent PO invoice cache.
 
-Design note: the permanent ledger table (`invoice_ledger`) must survive
-application restarts and must NOT expire after 24 hours -- it is the
-system of record used for duplicate detection and split-invoice cumulative
-calculations. The `processing_cache` table is a short-lived helper (default
-TTL 24h, configurable) and is safe to purge; nothing financial depends on it.
+Design note: this cache stores only what split-invoice cumulative tracking
+needs -- the matched PO number and the invoiced amount (plus decision, to
+know which rows count as "actually invoiced"). It intentionally does NOT
+track document hashes, vendor/invoice-number identity, or anything else;
+duplicate detection is not implemented in this system. The table must
+survive application restarts and never expire -- a PO can legitimately be
+invoiced against over a period of months.
 """
 from __future__ import annotations
 
@@ -19,35 +20,15 @@ from app.config import get_settings
 _local = threading.local()
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS invoice_ledger (
+CREATE TABLE IF NOT EXISTS po_invoice_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    invoice_id TEXT NOT NULL,
-    file_name TEXT,
-    vendor_name TEXT,
-    vendor_name_normalized TEXT,
-    invoice_number TEXT,
-    invoice_number_normalized TEXT,
-    invoice_date TEXT,
-    po_number TEXT,
-    po_number_normalized TEXT,
-    total_amount REAL,
-    document_hash TEXT NOT NULL,
+    po_number_normalized TEXT NOT NULL,
+    amount REAL,
     decision TEXT NOT NULL,
-    reason TEXT,
-    result_json TEXT,
-    processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_ledger_hash ON invoice_ledger(document_hash);
-CREATE INDEX IF NOT EXISTS idx_ledger_vendor_invnum ON invoice_ledger(vendor_name_normalized, invoice_number_normalized);
-CREATE INDEX IF NOT EXISTS idx_ledger_po ON invoice_ledger(po_number_normalized, vendor_name_normalized);
-
-CREATE TABLE IF NOT EXISTS processing_cache (
-    cache_key TEXT PRIMARY KEY,
-    payload TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL
-);
+CREATE INDEX IF NOT EXISTS idx_po_invoice_cache_po ON po_invoice_cache(po_number_normalized);
 """
 
 

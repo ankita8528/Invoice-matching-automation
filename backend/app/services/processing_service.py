@@ -6,23 +6,25 @@ function call in a fixed order (see README architecture diagram). The
 optional exception agent (agent/exception_agent.py) is invoked, if enabled,
 only *after* the deterministic decision has already been made, and it can
 never change that decision.
+
+Note: this system does not implement duplicate detection. The only
+persistent state it keeps is a slim (PO number, amount, decision) cache used
+purely to compute split/partial-invoice cumulative totals -- see
+rules/po_invoice_cache.py.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
-import time
 
 from app.agent.exception_agent import build_context_summary, investigate
 from app.config import Settings
-from app.duplicate.duplicate_detector import check_exact_document_duplicate, check_field_duplicates
-from app.duplicate.invoice_ledger import InvoiceLedger
-from app.extraction.invoice_parser import normalize_vision_json, parse_digital_text
+from app.extraction.invoice_parser import merge_structured_invoices, normalize_vision_json, parse_digital_text
 from app.extraction.ocr import OCRUnavailableError, configure_tesseract, run_ocr
 from app.extraction.pdf_extractor import InvalidPDFError, extract_text, render_first_page_to_image
 from app.extraction.vision_extractor import VisionExtractionError, extract_structured_json
 from app.matching.fuzzy_matcher import vendor_similarity
-from app.matching.normalization import normalize_invoice_number, normalize_po_number, normalize_vendor_name
+from app.matching.normalization import normalize_po_number, normalize_vendor_name
 from app.matching.po_matcher import MatchResult, match_po
 from app.models.invoice import StructuredInvoice
 from app.models.result import (
@@ -32,13 +34,13 @@ from app.models.result import (
     CheckStatus,
     Decision,
     DecisionResult,
-    DuplicateInfo,
     MatchedPO,
     POCandidate,
     SplitInvoiceInfo,
     VendorInfo,
 )
 from app.rules.decision_engine import decide
+from app.rules.po_invoice_cache import POInvoiceCache
 from app.rules.split_invoice import evaluate_split_invoice
 from app.rules.tolerance import check_tolerance
 from app.services.data_loader import DataStore
@@ -73,10 +75,10 @@ def _empty_structured_result(reason: str, document_hash: str, method: str, steps
 
 
 class ProcessingService:
-    def __init__(self, settings: Settings, data_store: DataStore, ledger: InvoiceLedger):
+    def __init__(self, settings: Settings, data_store: DataStore, cache: POInvoiceCache):
         self.settings = settings
         self.data_store = data_store
-        self.ledger = ledger
+        self.cache = cache
         configure_tesseract(settings.tesseract_cmd)
 
     def process_invoice(self, pdf_bytes: bytes, file_name: str) -> DecisionResult:
@@ -84,58 +86,44 @@ class ProcessingService:
         document_hash = hashlib.sha256(pdf_bytes).hexdigest()
         steps.append(f"SHA256 calculated: {document_hash}")
 
-        # --- Duplicate detection happens BEFORE any expensive extraction ---
-        exact_dup = check_exact_document_duplicate(document_hash, self.ledger)
-        if exact_dup.status == "EXACT_DUPLICATE":
-            steps.append(f"Exact document duplicate detected: {exact_dup.reason}")
-            result = DecisionResult(
-                decision=Decision.REJECT,
-                reason=exact_dup.reason,
-                checks={"duplicate_check": CheckResult(status=CheckStatus.FAIL, reason=exact_dup.reason)},
-                duplicate=exact_dup,
-                audit=AuditTrail(processing_steps=steps, document_hash=document_hash),
-            )
-            self._persist(
-                invoice_id=f"HASH-{document_hash[:12]}",
-                file_name=file_name,
-                vendor_name="",
-                invoice_number="",
-                invoice_date=None,
-                po_number=None,
-                total_amount=None,
-                document_hash=document_hash,
-                result=result,
-            )
-            return result
-        steps.append("Duplicate check (exact document) passed: no identical document on file.")
-
         # --- Text extraction ---
         try:
             extracted = extract_text(pdf_bytes, min_length_for_digital=self.settings.min_text_length_for_digital)
         except InvalidPDFError as exc:
             reason = f"Invoice could not be reliably extracted: {exc}"
             steps.append(reason)
-            result = _empty_structured_result(reason, document_hash, "none", steps)
-            self._persist(f"HASH-{document_hash[:12]}", file_name, "", "", None, None, None, document_hash, result)
-            return result
+            return _empty_structured_result(reason, document_hash, "none", steps)
 
-        if extracted.is_meaningful:
+        # Every invoice -- digital or scanned -- is now routed through the
+        # OCR+vision path as the PRIMARY extraction method: a hand-rolled
+        # regex/heuristic parser is inherently brittle against the long tail
+        # of real-world invoice layouts, while the vision model has proven
+        # far more robust across varied formats (see README section 6/7).
+        # For a digital PDF, the exact PyMuPDF text (not Tesseract OCR, which
+        # would only introduce noise) is passed alongside the rendered image
+        # for extra grounding. If the vision call fails or is unavailable
+        # (no network, no provider configured, quota, etc.), a digital PDF
+        # falls back to the deterministic regex parser rather than giving up
+        # -- a scanned PDF has no such fallback available.
+        is_digital = extracted.is_meaningful
+        if is_digital:
             steps.append("Digital PDF detected (usable text layer found).")
-            invoice = parse_digital_text(extracted.text)
-            steps.append("Invoice fields extracted via PyMuPDF text parsing.")
         else:
             steps.append("PDF text extraction returned no usable text.")
             steps.append("Scanned/image PDF detected.")
-            try:
-                image = render_first_page_to_image(pdf_bytes)
-                steps.append("PDF rendered to image.")
-            except InvalidPDFError as exc:
-                reason = f"Invoice could not be reliably extracted: {exc}"
-                steps.append(reason)
-                result = _empty_structured_result(reason, document_hash, "none", steps)
-                self._persist(f"HASH-{document_hash[:12]}", file_name, "", "", None, None, None, document_hash, result)
-                return result
 
+        try:
+            image = render_first_page_to_image(pdf_bytes)
+            steps.append("PDF rendered to image.")
+        except InvalidPDFError as exc:
+            reason = f"Invoice could not be reliably extracted: {exc}"
+            steps.append(reason)
+            return _empty_structured_result(reason, document_hash, "none", steps)
+
+        if is_digital:
+            ocr_text = extracted.text
+            steps.append("Using extracted digital text as document context for the vision model.")
+        else:
             ocr_text = ""
             try:
                 ocr_text = run_ocr(image)
@@ -143,44 +131,54 @@ class ProcessingService:
             except OCRUnavailableError as exc:
                 steps.append(f"Tesseract OCR unavailable ({exc}); continuing with vision model on image alone.")
 
-            try:
-                raw_json = extract_structured_json(
-                    image,
-                    ocr_text,
-                    provider=self.settings.vision_provider,
-                    model=self.settings.qwen_model,
-                    base_url=self.settings.ollama_base_url,
-                    timeout_seconds=self.settings.vision_request_timeout_seconds,
-                )
-                invoice = normalize_vision_json(raw_json)
-                steps.append("Qwen3-VL extraction executed.")
-                steps.append("Structured invoice JSON created.")
-            except VisionExtractionError as exc:
+        vision_method_tag = "pymupdf_qwen3_vl" if is_digital else "tesseract_qwen3_vl"
+        if self.settings.vision_provider == "huggingface":
+            vision_model, vision_base_url = self.settings.hf_vision_model, self.settings.hf_router_base_url
+        else:
+            vision_model, vision_base_url = self.settings.qwen_model, self.settings.ollama_base_url
+
+        try:
+            raw_json = extract_structured_json(
+                image,
+                ocr_text,
+                provider=self.settings.vision_provider,
+                model=vision_model,
+                base_url=vision_base_url,
+                timeout_seconds=self.settings.vision_request_timeout_seconds,
+                hf_api_token=self.settings.hf_api_token,
+            )
+            invoice = normalize_vision_json(raw_json, method=vision_method_tag)
+            steps.append("Qwen3-VL extraction executed.")
+            steps.append("Structured invoice JSON created.")
+            if is_digital:
+                # The vision call can succeed (no exception) but still return
+                # thin/empty data due to transient provider flakiness -- a
+                # digital PDF has a reliable deterministic fallback available,
+                # so use it to fill any gaps rather than silently accepting
+                # a worse result than the regex parser would have given.
+                regex_invoice = parse_digital_text(extracted.text)
+                merged = merge_structured_invoices(invoice, regex_invoice)
+                if merged.extraction_metadata.method != invoice.extraction_metadata.method:
+                    steps.append("Vision result was incomplete; filled gaps from deterministic text parsing.")
+                invoice = merged
+        except VisionExtractionError as exc:
+            if is_digital:
+                steps.append(f"Vision extraction failed ({exc}); falling back to deterministic text parsing.")
+                invoice = parse_digital_text(extracted.text)
+                steps.append("Invoice fields extracted via PyMuPDF text parsing (fallback).")
+            else:
                 reason = f"Invoice could not be reliably extracted: {exc}"
                 steps.append(reason)
-                result = _empty_structured_result(reason, document_hash, "tesseract_qwen3_vl", steps)
-                self._persist(f"HASH-{document_hash[:12]}", file_name, "", "", None, None, None, document_hash, result)
-                return result
+                return _empty_structured_result(reason, document_hash, "tesseract_qwen3_vl", steps)
 
         d = invoice.invoice_details
         p = invoice.payment_details
-        vendor_norm = normalize_vendor_name(d.vendor_name)
-        invnum_norm = normalize_invoice_number(d.invoice_number)
 
         checks: dict[str, CheckResult] = {}
         checks["invoice_extraction"] = _extraction_check(invoice)
         checks["required_fields_present"] = validate_required_fields(invoice)
         checks["arithmetic_check"] = validate_arithmetic(invoice, epsilon=self.settings.arithmetic_tolerance)
         steps.append("Invoice arithmetic validated.")
-
-        # --- Field-level duplicate checks (vendor+invoice number, potential dup) ---
-        duplicate = check_field_duplicates(d.vendor_name, d.invoice_number, d.invoice_date, p.total_amount, self.ledger)
-        checks["duplicate_check"] = (
-            CheckResult(status=CheckStatus.PASS, reason="No duplicate signals found.")
-            if duplicate.status == "NONE"
-            else CheckResult(status=CheckStatus.FAIL if duplicate.status == "VENDOR_INVOICE_DUPLICATE" else CheckStatus.WARNING, reason=duplicate.reason)
-        )
-        steps.append(f"Duplicate check (vendor/invoice number): {duplicate.status}")
 
         # --- Vendor validation ---
         vendor_check, vendor_info = validate_vendor(d.vendor_name, self.data_store.get_vendors())
@@ -207,6 +205,7 @@ class ProcessingService:
         matched_po_model: MatchedPO | None = None
         amount_analysis: AmountAnalysis
         split_info = SplitInvoiceInfo(invoice_type="FULL_INVOICE")
+        po_comparable_amount: float | None = None
 
         if match_result.matched_po is not None:
             po = match_result.matched_po
@@ -244,14 +243,21 @@ class ProcessingService:
                 tolerance_type = vendor_info.tolerance_type or "percentage"
                 tolerance_value = vendor_info.tolerance_value if vendor_info.tolerance_value is not None else 0.0
 
+            # PO amounts are quoted pre-tax (the PO spreadsheet has no tax column),
+            # so the PO-vs-invoice comparison must use the invoice SUBTOTAL, not
+            # the tax-inclusive total -- otherwise every invoice with legitimate
+            # tax on an exact PO match would incorrectly fail tolerance. This
+            # mirrors the real dataset's own rule (R006: "abs(invoice subtotal -
+            # PO subtotal) <= PO tolerance").
+            po_comparable_amount = p.subtotal_amount if p.subtotal_amount is not None else p.total_amount
+
             split_info = evaluate_split_invoice(
                 po_number_normalized=po.po_number_normalized,
-                vendor_name_normalized=vendor_norm,
-                current_invoice_total=p.total_amount,
+                current_invoice_total=po_comparable_amount,
                 po_amount=po.po_amount,
                 tolerance_type=tolerance_type,
                 tolerance_value=tolerance_value,
-                ledger=self.ledger,
+                cache=self.cache,
             )
             steps.append(
                 f"Split-invoice check: type={split_info.invoice_type}, previously_invoiced={split_info.previously_invoiced}, "
@@ -259,8 +265,8 @@ class ProcessingService:
             )
             checks["split_invoice_check"] = CheckResult(status=CheckStatus.PASS, reason=f"Invoice type: {split_info.invoice_type}.")
 
-            if p.total_amount is not None:
-                tol = check_tolerance(split_info.cumulative_invoiced or p.total_amount, po.po_amount, tolerance_type, tolerance_value)
+            if po_comparable_amount is not None:
+                tol = check_tolerance(split_info.cumulative_invoiced or po_comparable_amount, po.po_amount, tolerance_type, tolerance_value)
                 if split_info.invoice_type == "PARTIAL_INVOICE":
                     # A partial/split invoice is *expected* to be under the PO amount
                     # until the sequence completes -- only overbilling the PO is a failure.
@@ -271,7 +277,7 @@ class ProcessingService:
                             expected=po.po_amount,
                             actual=split_info.cumulative_invoiced,
                             difference=tol.difference,
-                            reason=f"Cumulative invoiced amount {split_info.cumulative_invoiced} exceeds PO amount "
+                            reason=f"Cumulative invoiced subtotal {split_info.cumulative_invoiced} exceeds PO amount "
                             f"{po.po_amount} plus the allowed {tolerance_type} tolerance of {tol.allowed_difference}.",
                         )
                         if over_billed
@@ -280,7 +286,7 @@ class ProcessingService:
                             expected=po.po_amount,
                             actual=split_info.cumulative_invoiced,
                             difference=tol.difference,
-                            reason=f"Cumulative invoiced amount {split_info.cumulative_invoiced} is a legitimate partial "
+                            reason=f"Cumulative invoiced subtotal {split_info.cumulative_invoiced} is a legitimate partial "
                             f"invoice against PO amount {po.po_amount} (not overbilled).",
                         )
                     )
@@ -291,7 +297,7 @@ class ProcessingService:
                             expected=po.po_amount,
                             actual=split_info.cumulative_invoiced,
                             difference=tol.difference,
-                            reason=f"Invoiced amount is within the vendor's {tolerance_type} tolerance "
+                            reason=f"Invoiced subtotal is within the vendor's {tolerance_type} tolerance "
                             f"(allowed difference {tol.allowed_difference}).",
                         )
                         if tol.within_tolerance
@@ -300,7 +306,7 @@ class ProcessingService:
                             expected=po.po_amount,
                             actual=split_info.cumulative_invoiced,
                             difference=tol.difference,
-                            reason=f"Invoiced amount {split_info.cumulative_invoiced} differs from PO amount "
+                            reason=f"Invoiced subtotal {split_info.cumulative_invoiced} differs from PO amount "
                             f"{po.po_amount} by {tol.difference}, exceeding the allowed {tolerance_type} tolerance of "
                             f"{tol.allowed_difference}.",
                         )
@@ -312,10 +318,10 @@ class ProcessingService:
                     allowed_tolerance=tol.allowed_difference,
                     tolerance_type=tolerance_type,
                 )
-                steps.append(f"Tolerance calculated: allowed={tol.allowed_difference}, actual_difference={tol.difference}.")
+                steps.append(f"Tolerance calculated (invoice subtotal vs PO amount): allowed={tol.allowed_difference}, actual_difference={tol.difference}.")
             else:
-                checks["tolerance_check"] = CheckResult(status=CheckStatus.NOT_CHECKED, reason="Invoice total amount is missing; tolerance could not be evaluated.")
-                amount_analysis = AmountAnalysis(invoice_total=None, po_total=po.po_amount)
+                checks["tolerance_check"] = CheckResult(status=CheckStatus.NOT_CHECKED, reason="Invoice subtotal/total amount is missing; tolerance could not be evaluated.")
+                amount_analysis = AmountAnalysis(invoice_total=p.total_amount, po_total=po.po_amount)
 
             matched_po_model = MatchedPO(
                 po_number=po.po_number,
@@ -341,7 +347,7 @@ class ProcessingService:
             checks["split_invoice_check"] = CheckResult(status=CheckStatus.NOT_CHECKED, reason="No matched PO; split-invoice state could not be evaluated.")
             amount_analysis = AmountAnalysis(invoice_total=p.total_amount, po_total=None)
 
-        outcome = decide(checks=checks, duplicate=duplicate, vendor=vendor_info, match_result=match_result, split_info=split_info)
+        outcome = decide(checks=checks, vendor=vendor_info, match_result=match_result, split_info=split_info)
         steps.append(f"Decision generated: {outcome.decision.value} - {outcome.reason}")
 
         result = DecisionResult(
@@ -352,14 +358,13 @@ class ProcessingService:
             matched_po=matched_po_model,
             po_candidates=match_result.candidates,
             amount_analysis=amount_analysis,
-            duplicate=duplicate,
             vendor=vendor_info,
             split_invoice=split_info,
             audit=AuditTrail(processing_steps=steps, document_hash=document_hash, extraction_method=invoice.extraction_metadata.method),
         )
 
         if self.settings.enable_exception_agent and outcome.decision == Decision.REVIEW:
-            context = build_context_summary(checks=checks, po_candidates=match_result.candidates, duplicate=duplicate, split_info=split_info, vendor=vendor_info)
+            context = build_context_summary(checks=checks, po_candidates=match_result.candidates, split_info=split_info, vendor=vendor_info)
             result.ai_exception_analysis = investigate(
                 context_summary=context,
                 model=self.settings.exception_agent_model,
@@ -368,44 +373,13 @@ class ProcessingService:
             )
             steps.append("Optional exception agent invoked for REVIEW case (advisory only; did not change the decision).")
 
-        self._persist(
-            invoice_id=d.invoice_number or f"HASH-{document_hash[:12]}",
-            file_name=file_name,
-            vendor_name=d.vendor_name or "",
-            invoice_number=d.invoice_number or "",
-            invoice_date=d.invoice_date,
-            po_number=matched_po_model.po_number if matched_po_model else d.po_number,
-            total_amount=p.total_amount,
-            document_hash=document_hash,
-            result=result,
-        )
-        return result
+        # Only matched-PO invoices are cacheable -- there's nothing meaningful
+        # to track for split-invoice purposes otherwise.
+        if matched_po_model is not None:
+            self.cache.insert(
+                po_number_normalized=normalize_po_number(matched_po_model.po_number),
+                amount=po_comparable_amount,
+                decision=outcome.decision.value,
+            )
 
-    def _persist(
-        self,
-        invoice_id: str,
-        file_name: str,
-        vendor_name: str,
-        invoice_number: str,
-        invoice_date: str | None,
-        po_number: str | None,
-        total_amount: float | None,
-        document_hash: str,
-        result: DecisionResult,
-    ) -> None:
-        self.ledger.insert(
-            invoice_id=invoice_id,
-            file_name=file_name,
-            vendor_name=vendor_name,
-            vendor_name_normalized=normalize_vendor_name(vendor_name),
-            invoice_number=invoice_number,
-            invoice_number_normalized=normalize_invoice_number(invoice_number),
-            invoice_date=invoice_date,
-            po_number=po_number,
-            po_number_normalized=normalize_po_number(po_number) if po_number else None,
-            total_amount=total_amount,
-            document_hash=document_hash,
-            decision=result.decision.value,
-            reason=result.reason,
-            result_json=result.model_dump(),
-        )
+        return result

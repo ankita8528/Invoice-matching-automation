@@ -23,10 +23,17 @@ class Settings(BaseSettings):
     )
 
     # --- Vision model (scanned invoices) ---
+    # vision_provider: "ollama" (local, default) or "huggingface" (Inference Providers API).
     vision_provider: str = "ollama"
     qwen_model: str = "qwen3-vl:8b"
     ollama_base_url: str = "http://localhost:11434"
     vision_request_timeout_seconds: int = 120
+
+    # --- Hugging Face Inference Providers (used only when vision_provider="huggingface") ---
+    # Token must have "Inference Providers" permission: https://huggingface.co/settings/tokens
+    hf_api_token: str = ""
+    hf_vision_model: str = "Qwen/Qwen3-VL-8B-Instruct"
+    hf_router_base_url: str = "https://router.huggingface.co/v1"
 
     # --- OCR ---
     tesseract_cmd: str = ""

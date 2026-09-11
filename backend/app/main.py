@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database import init_db
-from app.duplicate.invoice_ledger import InvoiceLedger
+from app.rules.po_invoice_cache import POInvoiceCache
 from app.services.data_loader import DataStore
 from app.services.processing_service import ProcessingService
 
@@ -35,12 +35,12 @@ async def lifespan(app: FastAPI):
     init_db()
 
     data_store = DataStore(settings.resolve(settings.po_file), settings.resolve(settings.vendor_file))
-    ledger = InvoiceLedger()
-    service = ProcessingService(settings, data_store, ledger)
+    cache = POInvoiceCache()
+    service = ProcessingService(settings, data_store, cache)
 
     app.state.settings = settings
     app.state.data_store = data_store
-    app.state.ledger = ledger
+    app.state.cache = cache
     app.state.processing_service = service
 
     logging.getLogger("app.main").info("Startup complete. PO_FILE=%s VENDOR_FILE=%s DB=%s", settings.po_file, settings.vendor_file, settings.database_path)

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.matching.po_matcher import MatchResult
-from app.models.result import CheckResult, CheckStatus, Decision, DuplicateInfo, SplitInvoiceInfo, VendorInfo
+from app.models.result import CheckResult, CheckStatus, Decision, SplitInvoiceInfo, VendorInfo
 
 
 @dataclass
@@ -26,7 +26,6 @@ class DecisionOutcome:
 def decide(
     *,
     checks: dict[str, CheckResult],
-    duplicate: DuplicateInfo,
     vendor: VendorInfo,
     match_result: MatchResult,
     split_info: SplitInvoiceInfo,
@@ -35,9 +34,6 @@ def decide(
     review_reasons: list[str] = []
 
     # ---------------- REJECT conditions (checked first, hard failures) ----------------
-    if duplicate.status in ("EXACT_DUPLICATE", "VENDOR_INVOICE_DUPLICATE"):
-        reject_reasons.append(duplicate.reason)
-
     if vendor.status == "NOT_APPROVED":
         reject_reasons.append(checks["vendor_approved"].reason)
 
@@ -86,9 +82,6 @@ def decide(
 
     if checks.get("tolerance_check", CheckResult(status=CheckStatus.PASS)).status == CheckStatus.FAIL:
         review_reasons.append(checks["tolerance_check"].reason)
-
-    if duplicate.status == "POTENTIAL_DUPLICATE":
-        review_reasons.append(duplicate.reason)
 
     if review_reasons:
         return DecisionOutcome(decision=Decision.REVIEW, reason=review_reasons[0], triggered_rules=review_reasons)

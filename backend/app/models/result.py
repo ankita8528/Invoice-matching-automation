@@ -52,12 +52,6 @@ class AmountAnalysis(BaseModel):
     tolerance_type: Optional[str] = None
 
 
-class DuplicateInfo(BaseModel):
-    status: str = "NONE"  # NONE | EXACT_DUPLICATE | VENDOR_INVOICE_DUPLICATE | POTENTIAL_DUPLICATE
-    matched_ledger_id: Optional[int] = None
-    reason: str = ""
-
-
 class SplitInvoiceInfo(BaseModel):
     invoice_type: str = "FULL_INVOICE"  # FULL_INVOICE | PARTIAL_INVOICE
     po_amount: Optional[float] = None
@@ -90,7 +84,6 @@ class DecisionResult(BaseModel):
     matched_po: Optional[MatchedPO] = None
     po_candidates: list[POCandidate] = Field(default_factory=list)
     amount_analysis: Optional[AmountAnalysis] = None
-    duplicate: Optional[DuplicateInfo] = None
     vendor: Optional[VendorInfo] = None
     split_invoice: Optional[SplitInvoiceInfo] = None
     ai_exception_analysis: Optional[dict] = None

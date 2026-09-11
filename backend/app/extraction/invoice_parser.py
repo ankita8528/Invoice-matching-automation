@@ -264,8 +264,8 @@ def normalize_vision_json(data: dict, *, method: str = "tesseract_qwen3_vl") -> 
             continue
         line_items.append(
             InvoiceLineItem(
-                item_name=raw.get("item_name"),
-                description=raw.get("description"),
+                item_name=_coerce_str(raw.get("item_name")),
+                description=_coerce_str(raw.get("description")),
                 quantity=_coerce_float(raw.get("quantity")),
                 unit_price=_coerce_float(raw.get("unit_price")),
                 amount=_coerce_float(raw.get("amount")),
@@ -286,10 +286,10 @@ def normalize_vision_json(data: dict, *, method: str = "tesseract_qwen3_vl") -> 
 
     return StructuredInvoice(
         invoice_details=InvoiceDetails(
-            vendor_name=details.get("vendor_name"),
-            invoice_number=details.get("invoice_number"),
-            invoice_date=_parse_date(details.get("invoice_date")) if details.get("invoice_date") else None,
-            po_number=details.get("po_number"),
+            vendor_name=_coerce_str(details.get("vendor_name")),
+            invoice_number=_coerce_str(details.get("invoice_number")),
+            invoice_date=_parse_date(_coerce_str(details.get("invoice_date"))),
+            po_number=_coerce_str(details.get("po_number")),
         ),
         line_items=line_items,
         payment_details=PaymentDetails(
@@ -301,6 +301,47 @@ def normalize_vision_json(data: dict, *, method: str = "tesseract_qwen3_vl") -> 
     )
 
 
+def merge_structured_invoices(primary: StructuredInvoice, fallback: StructuredInvoice) -> StructuredInvoice:
+    """Fills any gaps in `primary` (the vision-model result, for a digital PDF)
+    from `fallback` (the deterministic regex parser's result on the same
+    document), field by field. Vision-model API calls occasionally succeed
+    but return thin/empty data for a document it should have read perfectly
+    (transient provider flakiness, not a real extraction failure -- see
+    README section 6/7) -- this keeps that from silently degrading a digital
+    invoice that the deterministic parser would have gotten exactly right.
+    """
+    pd, fd = primary.invoice_details, fallback.invoice_details
+    pp, fp = primary.payment_details, fallback.payment_details
+
+    merged_details = InvoiceDetails(
+        vendor_name=pd.vendor_name or fd.vendor_name,
+        invoice_number=pd.invoice_number or fd.invoice_number,
+        invoice_date=pd.invoice_date or fd.invoice_date,
+        po_number=pd.po_number or fd.po_number,
+    )
+    merged_payment = PaymentDetails(
+        subtotal_amount=pp.subtotal_amount if pp.subtotal_amount is not None else fp.subtotal_amount,
+        tax_amount=pp.tax_amount if pp.tax_amount is not None else fp.tax_amount,
+        total_amount=pp.total_amount if pp.total_amount is not None else fp.total_amount,
+    )
+    merged_line_items = primary.line_items or fallback.line_items
+
+    required_present = sum(
+        1 for v in (merged_details.vendor_name, merged_details.invoice_number, merged_details.invoice_date, merged_payment.total_amount) if v
+    ) + (1 if merged_line_items else 0)
+    confidence = round(required_present / 5.0, 2)
+
+    used_fallback = merged_details != pd or merged_payment != pp or merged_line_items is not primary.line_items
+    method = f"{primary.extraction_metadata.method}+pymupdf_fallback" if used_fallback else primary.extraction_metadata.method
+
+    return StructuredInvoice(
+        invoice_details=merged_details,
+        line_items=merged_line_items,
+        payment_details=merged_payment,
+        extraction_metadata=ExtractionMetadata(method=method, confidence=confidence),
+    )
+
+
 def _coerce_float(value) -> float | None:
     if value is None:
         return None
@@ -308,4 +349,19 @@ def _coerce_float(value) -> float | None:
         return float(value)
     if isinstance(value, str):
         return _parse_number(value)
+    return None
+
+
+def _coerce_str(value) -> str | None:
+    """Vision models sometimes emit a number where a string field (invoice
+    number, PO number, ...) was asked for (e.g. 4022 instead of "4022").
+    Coerce rather than let a downstream Pydantic validation crash turn an
+    extraction quirk into an unhandled 500.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
     return None

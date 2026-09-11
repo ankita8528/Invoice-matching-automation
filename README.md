@@ -31,16 +31,15 @@ in total, all wired into one integration test.
 ```
 Invoice PDF
     |
-Duplicate detection (SHA256 of the raw bytes, checked BEFORE any extraction)
+PDF text extraction (PyMuPDF) -- determines digital vs scanned, and supplies
+    |                             the exact text as grounding context either way
+Render first page to image
     |
-PDF text extraction (PyMuPDF)
+Digital? use the extracted text as context : Scanned? run Tesseract OCR for context
     |
-   usable text? --NO--> render page to image -> Tesseract OCR -> Qwen3-VL (Ollama) -> structured JSON
-    |
-   YES
-    |
-Regex/heuristic structured extraction (no LLM)
-    |
+Qwen3-VL vision extraction (Ollama or Hugging Face Inference Providers) -- structured JSON
+    |   (digital PDFs fall back to a regex/heuristic parser if the vision call itself fails;
+    |    scanned PDFs have no such fallback and degrade to REVIEW)
 Invoice validation (required fields, arithmetic: qty*price, subtotal+tax=total)
     |
 Vendor validation (normalized name match against vendor master; approval status)
@@ -53,19 +52,20 @@ Invoice <-> PO checks (vendor identity, line items, quantity, unit price)
     |
 Tolerance (vendor- or PO-level, percentage or absolute)
     |
-Split/partial invoice handling (cumulative amount vs PO amount, from the permanent ledger)
+Split/partial invoice handling (cumulative amount vs PO amount, from the persistent PO invoice cache)
     |
 Decision engine (deterministic Python; REJECT > REVIEW > APPROVE/APPROVE_PARTIAL precedence)
     |
-Audit log + permanent invoice ledger (SQLite)
+Audit log + persistent PO invoice cache (SQLite)
     |
-JSON response  ->  React frontend
+JSON response  ->  Streamlit UI / React frontend
 ```
 
-Every box above is a plain, independently-testable Python module (see `backend/app/`). Nothing in
-that chain is an LLM call except the scanned-PDF OCR+vision step, and even there the model's output
-is normalized into the same Pydantic schema the digital-text parser produces and then runs through
-the *exact same* deterministic downstream pipeline.
+Every box above is a plain, independently-testable Python module (see `backend/app/`). The vision
+model is used for BOTH digital and scanned PDFs now (see section 7 for why), but it is still never
+the source of truth for arithmetic or the final decision -- its output is normalized into the same
+Pydantic schema regardless of path and then runs through the *exact same* deterministic downstream
+pipeline. This system does not implement duplicate detection (see section 8).
 
 ### Project layout
 
@@ -79,18 +79,18 @@ backend/
     extraction/                 pdf_extractor, ocr, vision_extractor, invoice_parser
     matching/                   normalization, fuzzy_matcher, po_matcher (levels 1/2/3)
     validation/                 invoice_validator, amount_validator, line_item_validator, vendor_validator
-    duplicate/                  duplicate_detector, invoice_ledger (permanent + temp cache)
-    rules/                      tolerance, split_invoice, decision_engine
+    rules/                      tolerance, split_invoice, po_invoice_cache, decision_engine
     models/                     invoice.py, po.py, result.py (Pydantic schemas)
     services/                   data_loader (PO/vendor spreadsheets), processing_service (orchestrator)
     agent/                      exception_agent.py (optional, advisory-only)
   tests/                       unit tests per module + one full-dataset integration test
 frontend/                      React + Vite UI
+streamlit_app.py                Streamlit showcase UI (no Node.js needed) -- see section 12
 data/
   purchase_orders.xlsx         merged: real dataset's POs + supplementary synthetic POs
   vendors.xlsx                 merged vendor master
   rules.yaml                   human-readable mirror of the scoring/tolerance constants
-  invoice_ledger.db            created at runtime (permanent ledger; not committed)
+  invoice_ledger.db            created at runtime (persistent PO invoice cache; not committed)
 invoices/                      27 test invoices (real dataset copies + synthetic) + ground_truth.json
 invoice_po_matching_dataset/    the REAL provided dataset, UNMODIFIED (see its own README)
 scripts/generate_dataset.py    builds data/*.xlsx + invoices/* from the real dataset + synthetic cases
@@ -143,12 +143,38 @@ attached.
 6. If OCR *and* the vision call both fail to produce anything usable, the endpoint still returns
    HTTP 200 with `decision: "REVIEW"` and a reason explaining extraction failed -- never a 500.
 
-**In this sandboxed dev environment, neither Tesseract nor Ollama is installed**, so all 7 scanned
-invoices in the dataset (1 synthetic + 6 real) currently resolve to `REVIEW` via this graceful
-fallback. The integration test marks these `environment_dependent: true` and reports them as
-`SKIP(env)` rather than hard failures -- see section 17 (Known limitations) and section 12 (Testing).
-With Tesseract + Ollama configured, they're expected to extract successfully and match the real
-dataset's ground truth (`APPROVE`/`REVIEW`/`REJECT` per invoice).
+The integration test marks all 7 scanned invoices (1 synthetic + 6 real) `environment_dependent:
+true` and reports them as `SKIP(env)` rather than hard failures if extraction doesn't succeed --
+see section 17 (Known limitations) and section 12 (Testing).
+
+**Verified live on a CPU-only laptop (no discrete GPU, 16 GB RAM shared with other running apps):**
+Tesseract and Ollama + `qwen3-vl:8b` were both installed and exercised end-to-end against a real
+scanned invoice from the dataset. Findings, in case you hit the same thing:
+
+- The full path works: text extraction correctly detects no usable text layer, the page renders to
+  an image, Tesseract OCR runs, and the image + OCR text are sent to Qwen3-VL.
+- On CPU only, a single scanned-invoice request took **~6 minutes** (image encoding alone was
+  ~2.5 minutes; text generation ran at ~3.6 tokens/sec) and required close to the full 6.1 GB
+  resident for the model. `VISION_REQUEST_TIMEOUT_SECONDS` defaults to 120s in `.env.example`,
+  which is enough for a GPU or a lightly-loaded machine but **too short for CPU-only inference**;
+  bump it (600+) if you're in that situation.
+- Ollama's `format: "json"` grammar-constrained decoding was tried first and, in this environment,
+  sometimes returned an empty `response` for the multimodal prompt even though the model had
+  generated real tokens (visible in Ollama's own server log). `vision_extractor.py` deliberately
+  does **not** set `format: "json"` for this reason -- it relies on the prompt's own JSON-only
+  instruction plus the defensive `_extract_first_json_object()` repair step (strips code fences,
+  finds the first balanced `{...}`), which proved more reliable in practice.
+- On a memory-constrained machine, loading the model for the first inference call can push free
+  RAM close to zero, which triggered this sandbox's OOM watchdog to kill the Ollama/backend
+  processes outright on more than one attempt. If you hit this, close other memory-heavy
+  applications before uploading a scanned invoice, or run on a machine with more headroom (a
+  discrete GPU changes this picture entirely -- inference moves off system RAM and is dramatically
+  faster).
+- Every one of these failure modes (timeout, empty/malformed model output, OOM) is handled by the
+  graceful-degradation path in `services/processing_service.py`: the request still returns HTTP 200
+  with a structured `REVIEW` decision and a clear reason, never a crash or a hang from the caller's
+  perspective (the OOM-killer terminating the whole server process is the one exception -- that's
+  an OS-level kill, not something application code can catch).
 
 ## 7. How PO matching works
 
@@ -175,25 +201,24 @@ Level 1/2 matches (a PO reference was present, even if malformed) can still reac
 
 ## 8. Duplicate detection
 
-Runs immediately after the SHA256 of the raw PDF bytes is computed -- before any extraction, so a
-resubmitted file is rejected cheaply. Three signals, checked in this project's `duplicate/` module:
-
-1. **Exact document hash** (`invoice_ledger.document_hash`) -> `REJECT` (`EXACT_DUPLICATE`).
-2. **Same normalized vendor + normalized invoice number** -> `REJECT` (`VENDOR_INVOICE_DUPLICATE`).
-3. **Same vendor + amount + date but a different invoice number** -> `REVIEW` (`POTENTIAL_DUPLICATE`).
-
-The **permanent ledger** (`invoice_ledger` table in SQLite) is never purged and survives restarts --
-it's the system of record for duplicate detection and split-invoice math. A separate,
-genuinely-expirable `processing_cache` table exists for any short-lived helper state
-(`TEMP_CACHE_TTL_HOURS`, default 24h) and nothing financial ever reads from it.
+**Not implemented.** An earlier version of this project had a permanent invoice ledger tracking
+document hashes, vendor+invoice-number identity, and potential-duplicate signals (exact-file,
+vendor+invoice-number, vendor+amount+date). That was deliberately removed in favor of a much
+smaller, purpose-built cache that stores only what split-invoice cumulative tracking needs -- see
+section 9. If you need duplicate detection back, `rules/po_invoice_cache.py` is the natural place
+to reintroduce a document-hash/vendor/invoice-number index alongside it.
 
 ## 9. Split/partial invoice handling
 
-`rules/split_invoice.py` sums prior *approved* ledger entries for the same (PO, vendor) pair to get
-`previously_invoiced`, adds the current invoice to get `cumulative_invoiced`, and compares that to
-the PO's amount. If there's already a prior invoice against that PO, or this invoice alone doesn't
-cover the full PO amount (within tolerance), it's marked `PARTIAL_INVOICE`. The tolerance check for
-a partial invoice only fails on **overbilling** (cumulative exceeds PO amount + tolerance) --
+`rules/po_invoice_cache.py` persists a minimal `(po_number, amount, decision)` row for every
+invoice that was matched to a PO -- nothing else (no document hash, no vendor/invoice-number
+identity; that's it deliberately not doing duplicate detection, see section 8). `rules/
+split_invoice.py` sums the amounts of prior *approved* (`APPROVE`/`APPROVE_PARTIAL`) rows for the
+same PO to get `previously_invoiced`, adds the current invoice's subtotal to get
+`cumulative_invoiced`, and compares that to the PO's amount. If there's already a prior invoice
+against that PO, or this invoice alone doesn't cover the full PO amount (within tolerance), it's
+marked `PARTIAL_INVOICE`. The tolerance check for a partial invoice only fails on **overbilling**
+(cumulative exceeds PO amount + tolerance) --
 under-billing is expected mid-sequence and is not an error. See `invoices/split_invoice_1/2/3.pdf`
 for a worked 40/30/30-of-100 example (all three correctly resolve to `APPROVE_PARTIAL`).
 
@@ -287,10 +312,13 @@ copy .env.example .env
 npm run dev
 ```
 
-## 14. Qwen / Ollama setup
+## 14. Qwen / Ollama / Hugging Face setup
 
-The vision provider is configurable (`VISION_PROVIDER`, default and only implemented value:
-`ollama`); no API keys are hard-coded anywhere.
+The vision provider is configurable (`VISION_PROVIDER`): `ollama` (local, default/preferred) or
+`huggingface` (Hugging Face Inference Providers, a hosted API). No API keys are hard-coded
+anywhere in either path.
+
+### Option A -- Ollama (local, preferred)
 
 ```bash
 # https://ollama.com
@@ -308,6 +336,39 @@ OLLAMA_BASE_URL=http://localhost:11434
 
 If Ollama isn't running or the model isn't pulled, scanned-invoice requests degrade gracefully to
 `REVIEW` (see section 6) instead of failing the request.
+
+**When to prefer this:** you have a GPU, or you're fine with local CPU inference. Verified
+end-to-end on this project's own CPU-only dev machine (see section 6) -- it works, but a single
+scanned invoice took ~6 minutes and nearly exhausted 16GB of RAM.
+
+### Option B -- Hugging Face Inference Providers (hosted API)
+
+No local model download, no local compute/memory cost -- inference runs on HF's infrastructure.
+Useful exactly when Option A's CPU/RAM cost isn't acceptable.
+
+1. Create a token with **Inference Providers** permission at
+   https://huggingface.co/settings/tokens.
+2. Set in `.env` (never commit a real token):
+
+```
+VISION_PROVIDER=huggingface
+HF_API_TOKEN=hf_your_token_here
+HF_VISION_MODEL=Qwen/Qwen3-VL-8B-Instruct
+HF_ROUTER_BASE_URL=https://router.huggingface.co/v1
+```
+
+This calls HF's OpenAI-compatible chat-completions endpoint
+(`POST {HF_ROUTER_BASE_URL}/chat/completions`, `Authorization: Bearer <token>`) with the image as a
+base64 `data:` URI in the message content, per
+https://huggingface.co/docs/inference-providers/en/tasks/chat-completion . `HF_VISION_MODEL` can
+include a `:provider` suffix (e.g. `Qwen/Qwen3-VL-8B-Instruct:featherless-ai`) to pin a specific
+backing provider; without one, HF routes to whichever provider currently serves the model.
+Deliberately does **not** use `format`/structured-output constraints here (see the note on Ollama's
+equivalent option in section 6) -- it relies on the prompt's own JSON-only instruction plus the
+same defensive JSON-repair parsing used for Ollama.
+
+If `HF_API_TOKEN` is missing, or the request fails/times out, this degrades gracefully to `REVIEW`
+exactly like the Ollama path -- never a crash.
 
 ## 15. Tesseract setup
 
@@ -372,10 +433,14 @@ invoices from scratch (idempotent; the real invoice PDFs are only copied, never 
   because that's what both the provided and synthetic invoices use. A genuinely arbitrary layout
   (e.g. a scanned-looking table with merged cells, or right-to-left column order) is not guaranteed
   to parse correctly with a digital text layer -- that's what the OCR+vision path is for.
-- **OCR/vision are not verified end-to-end in this environment** (no Tesseract/Ollama installed
-  here). The code path, prompt, and JSON-repair logic are implemented and unit-testable up to the
-  external call; the 7 scanned invoices in the dataset are the acceptance criteria once those
-  dependencies are installed.
+- **OCR/vision were verified live but not exhaustively** -- see section 6 for the full account.
+  Tesseract + Ollama + `qwen3-vl:8b` were installed and run end-to-end against a real scanned
+  invoice on CPU-only hardware: the path works (correct scanned-PDF detection, OCR, image+text sent
+  to the model), but a single request took ~6 minutes and required close to the full model size in
+  RAM, and repeated attempts triggered this sandbox's OOM watchdog on a memory-constrained machine.
+  Not all 7 scanned invoices in the dataset were run to a final decision because of the time/memory
+  cost per attempt; a machine with a GPU or more free RAM should be materially faster and more
+  stable, and is the recommended way to validate this path against the full dataset.
 - **Vendor fuzzy-matching floor (0.90) and item-similarity floor (0.55) are fixed constants**, not
   yet exposed via `.env`, since the dataset didn't require tuning them.
 - **Quantity checks only catch overbilling** (invoicing more than the PO), by design, so that
@@ -409,8 +474,8 @@ invoices from scratch (idempotent; the real invoice PDFs are only copied, never 
 4. Every important step is logged (`audit.processing_steps`, plus Python `logging`).
 5. Missing fields are `null`, never invented.
 6. Original spreadsheet row numbers are preserved and returned alongside a full PO snapshot.
-7. The permanent invoice ledger survives restarts and is not time-limited; only the separate
-   temporary processing cache has a TTL.
+7. The persistent PO invoice cache (used for split-invoice tracking) survives restarts and is not
+   time-limited -- a PO can legitimately be invoiced against over months.
 8. Every module under `backend/app/` is independently unit-testable (see `backend/tests/`).
 9. All configuration is environment-driven (`.env`/`config.py`); nothing is hardcoded, no secrets
    are committed.

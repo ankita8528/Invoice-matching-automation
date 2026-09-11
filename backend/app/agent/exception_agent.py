@@ -3,10 +3,10 @@
 This is NOT an autonomous agent that runs the pipeline -- the deterministic
 pipeline in services/processing_service.py always runs first and always
 produces the authoritative decision. When ENABLE_EXCEPTION_AGENT=true and the
-decision is REVIEW (an uncertain case: missing/ambiguous PO, possible
-duplicate, possible split invoice, unclear scanned invoice, etc.), this
-module makes ONE additional read-only LLM call to produce a human-readable
-investigation summary and a suggested next action for an AP analyst.
+decision is REVIEW (an uncertain case: missing/ambiguous PO, possible split
+invoice, unclear scanned invoice, etc.), this module makes ONE additional
+read-only LLM call to produce a human-readable investigation summary and a
+suggested next action for an AP analyst.
 
 Hard constraints:
 - It never changes `decision` or any CheckResult.
@@ -23,11 +23,10 @@ import requests
 logger = logging.getLogger("app.agent")
 
 
-def build_context_summary(*, checks: dict, po_candidates: list, duplicate, split_info, vendor) -> str:
+def build_context_summary(*, checks: dict, po_candidates: list, split_info, vendor) -> str:
     lines = [
         "Checks:",
         *[f"  - {name}: {result.status} ({result.reason})" for name, result in checks.items()],
-        f"Duplicate status: {duplicate.status} ({duplicate.reason})",
         f"Vendor status: {vendor.status} (confidence {vendor.match_confidence:.2f})",
         f"Split invoice: {split_info.invoice_type}",
     ]
