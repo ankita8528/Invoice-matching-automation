@@ -7,10 +7,10 @@ optional exception agent (agent/exception_agent.py) is invoked, if enabled,
 only *after* the deterministic decision has already been made, and it can
 never change that decision.
 
-Note: this system does not implement duplicate detection. The only
-persistent state it keeps is a slim (PO number, amount, decision) cache used
-purely to compute split/partial-invoice cumulative totals -- see
-rules/po_invoice_cache.py.
+Note: duplicate detection here is PO-scoped, not document/vendor/invoice-
+number based: an invoice is rejected as a duplicate only when its PO number,
+invoice number, and every amount/line-item field exactly match an
+already-processed invoice for that same PO -- see rules/po_invoice_cache.py.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from app.extraction.ocr import OCRUnavailableError, configure_tesseract, run_ocr
 from app.extraction.pdf_extractor import InvalidPDFError, extract_text, render_first_page_to_image
 from app.extraction.vision_extractor import VisionExtractionError, extract_structured_json
 from app.matching.fuzzy_matcher import vendor_similarity
-from app.matching.normalization import normalize_po_number, normalize_vendor_name
+from app.matching.normalization import normalize_invoice_number, normalize_po_number
 from app.matching.po_matcher import MatchResult, match_po
 from app.models.invoice import StructuredInvoice
 from app.models.result import (
@@ -206,6 +206,7 @@ class ProcessingService:
         amount_analysis: AmountAnalysis
         split_info = SplitInvoiceInfo(invoice_type="FULL_INVOICE")
         po_comparable_amount: float | None = None
+        duplicate_reason: str | None = None
 
         if match_result.matched_po is not None:
             po = match_result.matched_po
@@ -250,6 +251,24 @@ class ProcessingService:
             # mirrors the real dataset's own rule (R006: "abs(invoice subtotal -
             # PO subtotal) <= PO tolerance").
             po_comparable_amount = p.subtotal_amount if p.subtotal_amount is not None else p.total_amount
+
+            # Duplicate check: same PO, same invoice number, and every
+            # amount/line-item field matches an already-processed invoice.
+            invnum_norm = normalize_invoice_number(d.invoice_number)
+            duplicate_match = self.cache.find_duplicate(
+                po_number_normalized=po.po_number_normalized,
+                invoice_number_normalized=invnum_norm,
+                subtotal_amount=po_comparable_amount,
+                tax_amount=p.tax_amount,
+                total_amount=p.total_amount,
+                line_items=invoice.line_items,
+            )
+            if duplicate_match is not None:
+                duplicate_reason = f"duplicate invoice for {po.po_number}"
+                checks["duplicate_check"] = CheckResult(status=CheckStatus.FAIL, reason=duplicate_reason)
+            else:
+                checks["duplicate_check"] = CheckResult(status=CheckStatus.PASS, reason=f"No duplicate invoice found for {po.po_number}.")
+            steps.append(f"Duplicate check for {po.po_number}: {'DUPLICATE' if duplicate_match else 'none found'}.")
 
             split_info = evaluate_split_invoice(
                 po_number_normalized=po.po_number_normalized,
@@ -345,9 +364,10 @@ class ProcessingService:
             checks["unit_price_match"] = CheckResult(status=CheckStatus.NOT_CHECKED, reason="No matched PO to compare unit prices against.")
             checks["tolerance_check"] = CheckResult(status=CheckStatus.NOT_CHECKED, reason="No matched PO; tolerance could not be evaluated.")
             checks["split_invoice_check"] = CheckResult(status=CheckStatus.NOT_CHECKED, reason="No matched PO; split-invoice state could not be evaluated.")
+            checks["duplicate_check"] = CheckResult(status=CheckStatus.NOT_CHECKED, reason="No matched PO; duplicate check could not be evaluated.")
             amount_analysis = AmountAnalysis(invoice_total=p.total_amount, po_total=None)
 
-        outcome = decide(checks=checks, vendor=vendor_info, match_result=match_result, split_info=split_info)
+        outcome = decide(checks=checks, vendor=vendor_info, match_result=match_result, split_info=split_info, duplicate_reason=duplicate_reason)
         steps.append(f"Decision generated: {outcome.decision.value} - {outcome.reason}")
 
         result = DecisionResult(
@@ -374,11 +394,15 @@ class ProcessingService:
             steps.append("Optional exception agent invoked for REVIEW case (advisory only; did not change the decision).")
 
         # Only matched-PO invoices are cacheable -- there's nothing meaningful
-        # to track for split-invoice purposes otherwise.
+        # to track for split-invoice/duplicate purposes otherwise.
         if matched_po_model is not None:
             self.cache.insert(
                 po_number_normalized=normalize_po_number(matched_po_model.po_number),
-                amount=po_comparable_amount,
+                invoice_number_normalized=normalize_invoice_number(d.invoice_number),
+                subtotal_amount=po_comparable_amount,
+                tax_amount=p.tax_amount,
+                total_amount=p.total_amount,
+                line_items=invoice.line_items,
                 decision=outcome.decision.value,
             )
 

@@ -21,7 +21,7 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
 DECISION_COLORS = {
     "APPROVE": ("#0f5132", "#d1e7dd", "🟢"),
-    "APPROVE_PARTIAL": ("#084298", "#cfe2ff", "🔵"),
+    "Accept/partial payment": ("#084298", "#cfe2ff", "🔵"),
     "REVIEW": ("#664d03", "#fff3cd", "🟡"),
     "REJECT": ("#842029", "#f8d7da", "🔴"),
 }

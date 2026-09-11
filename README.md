@@ -2,7 +2,7 @@
 
 An AI-assisted, **deterministic** Invoice Processing and PO-Matching system. It takes one invoice
 PDF at a time (digital or scanned), extracts its fields, matches it to a purchase order, runs a
-fixed set of business-rule checks, and returns an explainable `APPROVE` / `APPROVE_PARTIAL` /
+fixed set of business-rule checks, and returns an explainable `APPROVE` / `Accept/partial payment` /
 `REVIEW` / `REJECT` decision with a full audit trail.
 
 ```
@@ -54,7 +54,7 @@ Tolerance (vendor- or PO-level, percentage or absolute)
     |
 Split/partial invoice handling (cumulative amount vs PO amount, from the persistent PO invoice cache)
     |
-Decision engine (deterministic Python; REJECT > REVIEW > APPROVE/APPROVE_PARTIAL precedence)
+Decision engine (deterministic Python; REJECT > REVIEW > APPROVE/"Accept/partial payment" precedence)
     |
 Audit log + persistent PO invoice cache (SQLite)
     |
@@ -201,26 +201,28 @@ Level 1/2 matches (a PO reference was present, even if malformed) can still reac
 
 ## 8. Duplicate detection
 
-**Not implemented.** An earlier version of this project had a permanent invoice ledger tracking
-document hashes, vendor+invoice-number identity, and potential-duplicate signals (exact-file,
-vendor+invoice-number, vendor+amount+date). That was deliberately removed in favor of a much
-smaller, purpose-built cache that stores only what split-invoice cumulative tracking needs -- see
-section 9. If you need duplicate detection back, `rules/po_invoice_cache.py` is the natural place
-to reintroduce a document-hash/vendor/invoice-number index alongside it.
+**PO-scoped, not document/vendor/invoice-number based.** `rules/po_invoice_cache.py` persists, for
+every invoice matched to a PO: the PO number, invoice number, subtotal, tax, total, and a
+normalized line-item signature (item/qty/price/amount, order-independent). An incoming invoice is
+rejected as a duplicate only when its PO number, invoice number, and *every* amount/line-item field
+exactly match an already-cached invoice for that same PO -- `REJECT`, reason `"duplicate invoice
+for <PO number>"`. Two different invoice numbers billing the same PO for the same amount are NOT
+flagged (that's ordinary, e.g. a corrected resubmission with a new invoice number, or two
+coincidentally-equal line items) -- only a true resubmission of the identical invoice is caught.
+This deliberately does not track document hashes or vendor identity independent of a PO match.
 
 ## 9. Split/partial invoice handling
 
-`rules/po_invoice_cache.py` persists a minimal `(po_number, amount, decision)` row for every
-invoice that was matched to a PO -- nothing else (no document hash, no vendor/invoice-number
-identity; that's it deliberately not doing duplicate detection, see section 8). `rules/
-split_invoice.py` sums the amounts of prior *approved* (`APPROVE`/`APPROVE_PARTIAL`) rows for the
-same PO to get `previously_invoiced`, adds the current invoice's subtotal to get
-`cumulative_invoiced`, and compares that to the PO's amount. If there's already a prior invoice
-against that PO, or this invoice alone doesn't cover the full PO amount (within tolerance), it's
-marked `PARTIAL_INVOICE`. The tolerance check for a partial invoice only fails on **overbilling**
-(cumulative exceeds PO amount + tolerance) --
-under-billing is expected mid-sequence and is not an error. See `invoices/split_invoice_1/2/3.pdf`
-for a worked 40/30/30-of-100 example (all three correctly resolve to `APPROVE_PARTIAL`).
+`rules/split_invoice.py` sums the subtotals of prior *accepted* (`APPROVE`/`Accept/partial
+payment`) cache rows for the same PO to get `previously_invoiced`, adds the current invoice's
+subtotal to get `cumulative_invoiced`, and compares that to the PO's amount. If there's already a
+prior invoice against that PO, or this invoice alone doesn't cover the full PO amount (within
+tolerance) -- i.e. the PO's amount is more than this invoice's subtotal -- it's marked
+`PARTIAL_INVOICE` and the decision is `Accept/partial payment`, reason `"split invoice for <PO
+number> ..."`. The tolerance check for a partial invoice only fails on **overbilling** (cumulative
+exceeds PO amount + tolerance) -- under-billing is expected mid-sequence and is not an error. See
+`invoices/split_invoice_1/2/3.pdf` for a worked 40/30/30-of-100 example (all three correctly
+resolve to `Accept/partial payment`).
 
 ## 10. Vendor tolerance
 
@@ -275,10 +277,15 @@ enabled.
 
 ## 12. Frontend usage
 
-`frontend/` is a small React + Vite app: an upload button, a colored decision badge
-(🟢 APPROVE / 🔵 APPROVE_PARTIAL / 🟡 REVIEW / 🔴 REJECT), invoice details, matched-PO details, a
-checks list (failed checks are visually distinct), and a collapsible audit trail. It calls
-`VITE_API_BASE_URL` (default `http://localhost:8000`).
+Two UIs, both pure clients of `POST /api/decide` with no business logic of their own:
+
+- **`streamlit_app.py`** -- the UI actually used/verified throughout this project's development
+  (no Node.js needed: `streamlit run streamlit_app.py`). Shows the PDF preview alongside a colored
+  decision badge (🟢 APPROVE / 🔵 Accept/partial payment / 🟡 REVIEW / 🔴 REJECT), the extracted
+  values, and a collapsible "Full details" section (matched PO, all checks, audit trail, raw JSON).
+- **`frontend/`** -- a React + Vite app with the same information: an upload button, decision
+  badge, invoice details, matched-PO details, a checks list (failed checks are visually distinct),
+  and a collapsible audit trail. Calls `VITE_API_BASE_URL` (default `http://localhost:8000`).
 
 > **Note on this sandbox:** the environment this was built in has no Node.js/npm installed, so the
 > frontend could not be `npm install`'d or run here. The backend was fully verified instead (unit
@@ -399,7 +406,7 @@ digital_01_clean_exact.pdf        APPROVE          APPROVE          PASS
 digital_02_price_mismatch.pdf     REVIEW           REVIEW           PASS
 digital_04_missing_po.pdf         REVIEW           REVIEW           PASS
 scanned_01_exact_match.pdf        APPROVE          REVIEW           SKIP(env)
-split_invoice_1.pdf               APPROVE_PARTIAL  APPROVE_PARTIAL  PASS
+split_invoice_1.pdf               Accept/partial payment  Accept/partial payment  PASS
 unapproved_vendor.pdf             REJECT           REJECT           PASS
 ...
 ```

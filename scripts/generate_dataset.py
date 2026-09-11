@@ -434,7 +434,7 @@ def build_invoices() -> dict:
         line_items=[("Housekeeping Service - Man Days", "Housekeeping Service - Man Days", 40, 1000.00, 40000.00)],
         subtotal=40000.00, tax=0.00, total=40000.00,
     )
-    ground_truth["split_invoice_1.pdf"] = {"expected_decision": "APPROVE_PARTIAL", "notes": "First of 3 split invoices against PO2010 (40/100 man-days)."}
+    ground_truth["split_invoice_1.pdf"] = {"expected_decision": "Accept/partial payment", "notes": "First of 3 split invoices against PO2010 (40/100 man-days)."}
 
     render_template_a(
         INVOICES_DIR / "split_invoice_2.pdf",
@@ -445,7 +445,7 @@ def build_invoices() -> dict:
         line_items=[("Housekeeping Service - Man Days", "Housekeeping Service - Man Days", 30, 1000.00, 30000.00)],
         subtotal=30000.00, tax=0.00, total=30000.00,
     )
-    ground_truth["split_invoice_2.pdf"] = {"expected_decision": "APPROVE_PARTIAL", "notes": "Second of 3 split invoices against PO2010 (cumulative 70/100 man-days)."}
+    ground_truth["split_invoice_2.pdf"] = {"expected_decision": "Accept/partial payment", "notes": "Second of 3 split invoices against PO2010 (cumulative 70/100 man-days)."}
 
     render_template_a(
         INVOICES_DIR / "split_invoice_3.pdf",
@@ -456,7 +456,7 @@ def build_invoices() -> dict:
         line_items=[("Housekeeping Service - Man Days", "Housekeeping Service - Man Days", 30, 1000.00, 30000.00)],
         subtotal=30000.00, tax=0.00, total=30000.00,
     )
-    ground_truth["split_invoice_3.pdf"] = {"expected_decision": "APPROVE_PARTIAL", "notes": "Third of 3 split invoices against PO2010; cumulative reaches 100/100 man-days."}
+    ground_truth["split_invoice_3.pdf"] = {"expected_decision": "Accept/partial payment", "notes": "Third of 3 split invoices against PO2010; cumulative reaches 100/100 man-days."}
 
     # 10. scanned_invoice -> REVIEW when OCR/vision aren't configured locally (environment-dependent)
     render_scanned_invoice(

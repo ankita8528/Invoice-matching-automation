@@ -29,11 +29,15 @@ def decide(
     vendor: VendorInfo,
     match_result: MatchResult,
     split_info: SplitInvoiceInfo,
+    duplicate_reason: str | None = None,
 ) -> DecisionOutcome:
     reject_reasons: list[str] = []
     review_reasons: list[str] = []
 
     # ---------------- REJECT conditions (checked first, hard failures) ----------------
+    if duplicate_reason:
+        reject_reasons.append(duplicate_reason)
+
     if vendor.status == "NOT_APPROVED":
         reject_reasons.append(checks["vendor_approved"].reason)
 
@@ -88,10 +92,10 @@ def decide(
 
     # ---------------- APPROVE / APPROVE_PARTIAL ----------------
     if split_info.invoice_type == "PARTIAL_INVOICE":
+        po_number = match_result.matched_po.po_number if match_result.matched_po else "the matched PO"
         reason = (
-            f"Valid partial/split invoice against PO: cumulative invoiced "
-            f"{split_info.cumulative_invoiced} of PO amount {split_info.po_amount} "
-            f"(remaining balance {split_info.remaining_balance}). All other checks passed."
+            f"split invoice for {po_number} (cumulative invoiced {split_info.cumulative_invoiced} of "
+            f"PO amount {split_info.po_amount}, remaining balance {split_info.remaining_balance})"
         )
         return DecisionOutcome(decision=Decision.APPROVE_PARTIAL, reason=reason)
 

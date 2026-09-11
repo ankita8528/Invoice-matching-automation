@@ -90,4 +90,4 @@ def test_approve_partial_for_split_invoice():
         match_result=MatchResult(matched_po=_po(), match_method="exact_normalized_po", match_confidence=1.0),
         split_info=SplitInvoiceInfo(invoice_type="PARTIAL_INVOICE", po_amount=100000, previously_invoiced=40000, current_invoice=30000, cumulative_invoiced=70000, remaining_balance=30000),
     )
-    assert outcome.decision == "APPROVE_PARTIAL"
+    assert outcome.decision == "Accept/partial payment"

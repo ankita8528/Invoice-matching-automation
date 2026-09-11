@@ -30,17 +30,17 @@
     "source": "synthetic (this script)"
   },
   "split_invoice_1.pdf": {
-    "expected_decision": "APPROVE_PARTIAL",
+    "expected_decision": "Accept/partial payment",
     "notes": "First of 3 split invoices against PO2010 (40/100 man-days).",
     "source": "synthetic (this script)"
   },
   "split_invoice_2.pdf": {
-    "expected_decision": "APPROVE_PARTIAL",
+    "expected_decision": "Accept/partial payment",
     "notes": "Second of 3 split invoices against PO2010 (cumulative 70/100 man-days).",
     "source": "synthetic (this script)"
   },
   "split_invoice_3.pdf": {
-    "expected_decision": "APPROVE_PARTIAL",
+    "expected_decision": "Accept/partial payment",
     "notes": "Third of 3 split invoices against PO2010; cumulative reaches 100/100 man-days.",
     "source": "synthetic (this script)"
   },

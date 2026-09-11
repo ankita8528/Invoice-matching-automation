@@ -16,7 +16,10 @@ class CheckStatus(str, Enum):
 
 class Decision(str, Enum):
     APPROVE = "APPROVE"
-    APPROVE_PARTIAL = "APPROVE_PARTIAL"
+    # The Python identifier stays APPROVE_PARTIAL (so code reads naturally),
+    # but the actual decision string returned by the API / stored in the
+    # cache is "Accept/partial payment" per explicit request.
+    APPROVE_PARTIAL = "Accept/partial payment"
     REVIEW = "REVIEW"
     REJECT = "REJECT"
 

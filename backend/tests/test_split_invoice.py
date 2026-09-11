@@ -2,6 +2,18 @@ from app.rules.po_invoice_cache import POInvoiceCache
 from app.rules.split_invoice import evaluate_split_invoice
 
 
+def _insert(cache, po, invnum, subtotal, decision):
+    cache.insert(
+        po_number_normalized=po,
+        invoice_number_normalized=invnum,
+        subtotal_amount=subtotal,
+        tax_amount=0,
+        total_amount=subtotal,
+        line_items=[],
+        decision=decision,
+    )
+
+
 def test_split_invoice_cumulative_math(settings):
     from app.database import init_db
 
@@ -21,7 +33,7 @@ def test_split_invoice_cumulative_math(settings):
     assert info1.cumulative_invoiced == 40000
     assert info1.remaining_balance == 60000
 
-    cache.insert(po_number_normalized="PO1010", amount=40000, decision="APPROVE_PARTIAL")
+    _insert(cache, "PO1010", "INV-A", 40000, "Accept/partial payment")
 
     info2 = evaluate_split_invoice(
         po_number_normalized="PO1010",
@@ -55,14 +67,14 @@ def test_full_invoice_not_marked_partial(settings):
 
 def test_only_approved_decisions_count_toward_cumulative(settings):
     """A REVIEW/REJECT row must not contribute to the cumulative total --
-    only APPROVE/APPROVE_PARTIAL amounts represent actually-accepted invoicing.
+    only APPROVE/Accept-partial-payment amounts represent actually-accepted invoicing.
     """
     from app.database import init_db
 
     init_db()
     cache = POInvoiceCache()
-    cache.insert(po_number_normalized="PO2010", amount=40000, decision="REVIEW")
-    cache.insert(po_number_normalized="PO2010", amount=99999, decision="REJECT")
+    _insert(cache, "PO2010", "INV-B", 40000, "REVIEW")
+    _insert(cache, "PO2010", "INV-C", 99999, "REJECT")
 
     info = evaluate_split_invoice(
         po_number_normalized="PO2010",

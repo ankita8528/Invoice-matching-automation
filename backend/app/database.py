@@ -1,12 +1,15 @@
 """SQLite connection + schema management for the persistent PO invoice cache.
 
-Design note: this cache stores only what split-invoice cumulative tracking
-needs -- the matched PO number and the invoiced amount (plus decision, to
-know which rows count as "actually invoiced"). It intentionally does NOT
-track document hashes, vendor/invoice-number identity, or anything else;
-duplicate detection is not implemented in this system. The table must
-survive application restarts and never expire -- a PO can legitimately be
-invoiced against over a period of months.
+Design note: this cache stores, per processed invoice matched to a PO: the
+PO number, invoice number, subtotal/tax/total, and a normalized line-item
+signature. It powers two things -- see rules/po_invoice_cache.py:
+  1. Split-invoice cumulative tracking (PO amount vs. subtotal invoiced so far).
+  2. Duplicate detection: an invoice whose PO number, invoice number, and
+     every amount/line-item field exactly match an already-cached invoice is
+     rejected as a duplicate.
+It intentionally does NOT track document hashes or vendor identity. The
+table must survive application restarts and never expire -- a PO can
+legitimately be invoiced against over a period of months.
 """
 from __future__ import annotations
 
@@ -23,7 +26,11 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS po_invoice_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     po_number_normalized TEXT NOT NULL,
-    amount REAL,
+    invoice_number_normalized TEXT,
+    subtotal_amount REAL,
+    tax_amount REAL,
+    total_amount REAL,
+    line_items_signature TEXT,
     decision TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
