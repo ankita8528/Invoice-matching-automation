@@ -480,3 +480,49 @@ invoices from scratch (idempotent; the real invoice PDFs are only copied, never 
 9. All configuration is environment-driven (`.env`/`config.py`); nothing is hardcoded, no secrets
    are committed.
 10. Ambiguous cases are never silently approved -- see sections 7 and 9.
+
+## 21. Docker deployment
+
+`Dockerfile` builds the backend API only (not the frontend/Streamlit demo UIs). It installs
+Tesseract OCR (on PATH, so `TESSERACT_CMD` can stay blank), bakes in `data/purchase_orders.xlsx`,
+`data/vendors.xlsx`, and `data/rules.yaml`, and runs as a non-root user. No secrets are baked into
+the image -- `.env` is excluded via `.dockerignore`; pass real config at `docker run`/`docker
+compose` time.
+
+```bash
+docker build -t invoice-ap-matching .
+
+docker run -p 8000:8000 \
+  --env-file .env \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/logs:/app/logs" \
+  invoice-ap-matching
+```
+
+or with the included `docker-compose.yml` (reads `.env` and bind-mounts `data/`/`logs/` for you):
+
+```bash
+docker compose up --build
+```
+
+Then verify:
+
+```bash
+curl http://localhost:8000/api/health
+curl -X POST http://localhost:8000/api/decide -F "file=@invoices/exact_match.pdf"
+```
+
+For a genuine `VISION_PROVIDER=huggingface` deployment (no local model/GPU needed), just make sure
+`HF_API_TOKEN` is set in the environment passed to the container -- never in the image. For
+`VISION_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://localhost:11434` in `.env.example` refers to
+*inside the container*; point it at wherever Ollama is actually reachable from there (e.g. a
+sibling container's service name in `docker-compose.yml`, or `http://host.docker.internal:11434`
+on Docker Desktop for the host machine).
+
+**Persisting the PO invoice cache**: `data/invoice_ledger.db` (see section 9) is created at
+startup and must survive container restarts/recreations. The compose file bind-mounts `./data`
+directly, which also works for local testing since the repo's real `data/*.xlsx` files are already
+there. If you ship the image to a server *without* this repo alongside it, use a named volume
+instead of a bind mount for `/app/data` -- Docker seeds a named volume from the image's own
+directory contents on first use, whereas a bind mount to an empty host path would shadow the
+baked-in PO/vendor spreadsheets with nothing. See the comment in `docker-compose.yml`.

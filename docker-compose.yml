@@ -1,0 +1,25 @@
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Local-testing convenience: bind-mounts this repo's data/ and logs/
+      # straight into the container, so the PO invoice cache persists across
+      # restarts and you can edit purchase_orders.xlsx/vendors.xlsx on the
+      # host without rebuilding the image.
+      #
+      # For a real deployment where the image is shipped WITHOUT this repo
+      # alongside it, use a named volume instead so the image's baked-in
+      # data/*.xlsx seed it on first run (a bind mount to a host path that
+      # doesn't have those files would shadow them with an empty directory):
+      #   volumes:
+      #     - po_data:/app/data
+      # and declare at the bottom of this file:
+      #   volumes:
+      #     po_data:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped

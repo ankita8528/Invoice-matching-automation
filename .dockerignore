@@ -1,0 +1,37 @@
+# Secrets / local env
+.env
+.env.example
+
+# Version control / editor
+.git
+.gitignore
+.idea
+.vscode
+
+# Python
+**/__pycache__
+**/*.pyc
+.venv
+venv
+backend/.pytest_cache
+
+# Runtime state -- created fresh inside the container, never baked in
+data/invoice_ledger.db
+data/invoice_ledger.db-wal
+data/invoice_ledger.db-shm
+logs
+
+# Not needed in the deployed backend image
+backend/tests
+invoices
+invoice_po_matching_dataset
+scripts
+frontend
+frontend/node_modules
+frontend/dist
+streamlit_app.py
+README.md
+
+Dockerfile
+.dockerignore
+docker-compose.yml
